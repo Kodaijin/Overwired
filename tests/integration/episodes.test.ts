@@ -416,6 +416,158 @@ runIfDatabase("episode lifecycle", () => {
     });
   });
 
+  describe("re-saving a form that only carries whole minutes", () => {
+    /**
+     * `datetime-local` fields cannot show or send the seconds of a stored
+     * instant. These cover the times a form posts a value that looks earlier
+     * than what is on record purely because of that - which used to make every
+     * ended episode impossible to save.
+     */
+    const withSeconds = (iso: string, seconds: number, ms: number) => {
+      const date = at(iso);
+      date.setUTCSeconds(seconds, ms);
+      return date;
+    };
+
+    /** What the browser would send back for a stored instant, untouched. */
+    const asFormWouldPost = (date: Date) => {
+      const truncated = new Date(date);
+      truncated.setUTCSeconds(0, 0);
+      return truncated;
+    };
+
+    it("saves an ended episode whose times were not touched", async () => {
+      const startedAt = withSeconds("2024-03-01T10:00:00Z", 37, 412);
+      const endedAt = withSeconds("2024-03-01T14:00:00Z", 51, 903);
+
+      const id = await createEpisode(userId, baseEpisode({ startedAt, severity: 5 }));
+      // The closing reading lands on exactly the same instant as the end.
+      await endEpisode(userId, { id, endedAt, severity: 2, note: null });
+
+      await updateEpisode(userId, {
+        id,
+        startedAt: asFormWouldPost(startedAt),
+        endedAt: asFormWouldPost(endedAt),
+        painType: "renamed",
+        description: null,
+        notes: null,
+        locationIds: [],
+        characteristicIds: [],
+        triggerIds: [],
+        symptomIds: [],
+      });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.painType).toBe("renamed");
+      // The seconds the form could not carry are still there.
+      expect(episode!.startedAt).toEqual(startedAt);
+      expect(episode!.endedAt).toEqual(endedAt);
+    });
+
+    it("still applies a genuine change to the end time", async () => {
+      const startedAt = withSeconds("2024-03-01T10:00:00Z", 37, 412);
+      const endedAt = withSeconds("2024-03-01T14:00:00Z", 51, 903);
+
+      const id = await createEpisode(userId, baseEpisode({ startedAt, severity: 5 }));
+      await endEpisode(userId, { id, endedAt, severity: 2, note: null });
+
+      const movedTo = at("2024-03-01T15:30:00Z");
+      await updateEpisode(userId, {
+        id,
+        startedAt: asFormWouldPost(startedAt),
+        endedAt: movedTo,
+        painType: null,
+        description: null,
+        notes: null,
+        locationIds: [],
+        characteristicIds: [],
+        triggerIds: [],
+        symptomIds: [],
+      });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.endedAt).toEqual(movedTo);
+    });
+
+    it("still refuses an end time that really would strand a reading", async () => {
+      const startedAt = at("2024-03-01T10:00:00Z");
+      const id = await createEpisode(userId, baseEpisode({ startedAt, severity: 5 }));
+      await addMeasurement(userId, {
+        episodeId: id,
+        severity: 8,
+        recordedAt: at("2024-03-01T13:00:00Z"),
+        note: null,
+      });
+
+      await expect(
+        updateEpisode(userId, {
+          id,
+          startedAt,
+          endedAt: at("2024-03-01T12:00:00Z"),
+          painType: null,
+          description: null,
+          notes: null,
+          locationIds: [],
+          characteristicIds: [],
+          triggerIds: [],
+          symptomIds: [],
+        }),
+      ).rejects.toBeInstanceOf(WindowConflictError);
+    });
+
+    it("accepts a reading typed for the minute the episode started", async () => {
+      const startedAt = withSeconds("2024-03-01T10:00:00Z", 37, 412);
+      const id = await createEpisode(userId, baseEpisode({ startedAt, severity: 5 }));
+
+      await addMeasurement(userId, {
+        episodeId: id,
+        severity: 7,
+        recordedAt: asFormWouldPost(startedAt),
+        note: null,
+      });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.measurements).toHaveLength(2);
+    });
+
+    it("still refuses a reading from genuinely before the episode", async () => {
+      const startedAt = at("2024-03-01T10:00:00Z");
+      const id = await createEpisode(userId, baseEpisode({ startedAt, severity: 5 }));
+
+      await expect(
+        addMeasurement(userId, {
+          episodeId: id,
+          severity: 7,
+          recordedAt: at("2024-03-01T09:59:00Z"),
+          note: null,
+        }),
+      ).rejects.toBeInstanceOf(WindowConflictError);
+    });
+
+    it("ends an episode at the minute of its last reading", async () => {
+      const startedAt = at("2024-03-01T10:00:00Z");
+      const id = await createEpisode(userId, baseEpisode({ startedAt, severity: 5 }));
+      const lastReading = withSeconds("2024-03-01T13:00:00Z", 44, 700);
+      await addMeasurement(userId, {
+        episodeId: id,
+        severity: 8,
+        recordedAt: lastReading,
+        note: null,
+      });
+
+      await endEpisode(userId, {
+        id,
+        endedAt: asFormWouldPost(lastReading),
+        severity: 3,
+        note: null,
+      });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.endedAt).not.toBeNull();
+      expect(episode!.currentSeverity).toBe(3);
+    });
+  });
+
   describe("correcting the start and end pain level", () => {
     const START = at("2024-03-01T10:00:00Z");
     const END = at("2024-03-01T14:00:00Z");

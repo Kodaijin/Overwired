@@ -3,6 +3,7 @@ import { computeEpisodeCache } from "@/lib/episode-metrics";
 import { buildEpisodeWhere, EPISODES_PER_PAGE } from "@/lib/filters";
 import { prisma } from "@/lib/prisma";
 import type { EpisodeFilter } from "@/lib/schemas";
+import { isEarlierMinute, preserveStoredTime } from "@/lib/time-precision";
 
 /**
  * Episode data access.
@@ -311,8 +312,16 @@ export async function updateEpisode(
   data: UpdateEpisodeData,
 ): Promise<void> {
   await prisma.$transaction(async (tx) => {
-    await assertOwnsEpisode(tx, userId, data.id);
-    await assertWindowFitsMeasurements(tx, data.id, data.startedAt, data.endedAt);
+    const existing = await assertOwnsEpisode(tx, userId, data.id);
+
+    // The form can only express minutes, so a time in the same minute as the
+    // stored one means "untouched" - keep the stored value rather than
+    // truncating its seconds away.
+    const startedAt = preserveStoredTime(data.startedAt, existing.startedAt);
+    const requestedEnd = preserveStoredTime(data.endedAt, existing.endedAt);
+
+    await assertWindowFitsMeasurements(tx, data.id, startedAt, requestedEnd);
+    const endedAt = await clampEndToLastReading(tx, data.id, requestedEnd);
 
     const [locationIds, characteristicIds, triggerIds, symptomIds] = await Promise.all([
       ownedIds(tx, userId, "location", data.locationIds),
@@ -324,8 +333,8 @@ export async function updateEpisode(
     await tx.episode.update({
       where: { id: data.id },
       data: {
-        startedAt: data.startedAt,
-        endedAt: data.endedAt,
+        startedAt,
+        endedAt,
         painType: data.painType,
         description: data.description,
         notes: data.notes,
@@ -350,7 +359,7 @@ export async function updateEpisode(
       },
     });
 
-    await applyBoundarySeverities(tx, data.id, data.endedAt, {
+    await applyBoundarySeverities(tx, data.id, endedAt, {
       start: data.startSeverity ?? null,
       end: data.endSeverity ?? null,
     });
@@ -442,8 +451,9 @@ export async function endEpisode(
   await prisma.$transaction(async (tx) => {
     await assertOwnsEpisode(tx, userId, input.id);
 
-    const endedAt = input.endedAt ?? new Date();
-    await assertWindowFitsMeasurements(tx, input.id, null, endedAt);
+    const requested = input.endedAt ?? new Date();
+    await assertWindowFitsMeasurements(tx, input.id, null, requested);
+    const endedAt = (await clampEndToLastReading(tx, input.id, requested))!;
 
     if (input.severity != null) {
       await tx.painMeasurement.create({
@@ -489,13 +499,13 @@ export async function addMeasurement(
     const episode = await assertOwnsEpisode(tx, userId, input.episodeId);
     const recordedAt = input.recordedAt ?? new Date();
 
-    if (recordedAt.getTime() < episode.startedAt.getTime()) {
+    if (isEarlierMinute(recordedAt, episode.startedAt)) {
       throw new WindowConflictError(
         "That reading is before the episode started. Adjust the time, or edit the episode's start time first.",
       );
     }
 
-    if (episode.endedAt && recordedAt.getTime() > episode.endedAt.getTime()) {
+    if (episode.endedAt && isEarlierMinute(episode.endedAt, recordedAt)) {
       throw new WindowConflictError(
         "That reading is after the episode ended. Adjust the time, or reopen the episode first.",
       );
@@ -542,6 +552,36 @@ export async function deleteMeasurement(
 }
 
 /**
+ * Nudges an end time up to the last reading when the two share a minute.
+ *
+ * Because the boundary checks compare whole minutes, an end time typed as
+ * "13:00" is accepted for an episode whose last reading is at 13:00:44. Left
+ * alone that reading would sit after the episode's own end, and a closing
+ * reading recorded at 13:00:00 would not be the final one - so the episode's
+ * ending level would be the older reading instead of the one just entered.
+ *
+ * The adjustment is never more than a minute: anything larger is refused
+ * outright by `assertWindowFitsMeasurements`.
+ */
+async function clampEndToLastReading(
+  tx: Prisma.TransactionClient,
+  episodeId: string,
+  endedAt: Date | null,
+): Promise<Date | null> {
+  if (endedAt == null) return null;
+
+  const latest = await tx.painMeasurement.findFirst({
+    where: { episodeId },
+    orderBy: { recordedAt: "desc" },
+    select: { recordedAt: true },
+  });
+
+  return latest && latest.recordedAt.getTime() > endedAt.getTime()
+    ? latest.recordedAt
+    : endedAt;
+}
+
+/**
  * Rejects a window change that would strand existing readings outside it.
  * Passing null for either bound leaves that side unchanged.
  */
@@ -566,13 +606,13 @@ async function assertWindowFitsMeasurements(
     }),
   ]);
 
-  if (startedAt && earliest && startedAt.getTime() > earliest.recordedAt.getTime()) {
+  if (startedAt && earliest && isEarlierMinute(earliest.recordedAt, startedAt)) {
     throw new WindowConflictError(
       "There are pain readings before that start time. Remove or re-time them first.",
     );
   }
 
-  if (endedAt && latest && endedAt.getTime() < latest.recordedAt.getTime()) {
+  if (endedAt && latest && isEarlierMinute(endedAt, latest.recordedAt)) {
     throw new WindowConflictError(
       "There are pain readings after that end time. Remove or re-time them first.",
     );
