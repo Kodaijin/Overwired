@@ -1,0 +1,301 @@
+// Pain tracker schema.
+//
+// Design notes:
+//  - Severity is append-only. `PainMeasurement` rows are never mutated by the
+//    "update current pain" flow, so the historical timeline stays intact.
+//  - `Episode.peakSeverity` / `minSeverity` / `currentSeverity` / `durationSeconds`
+//    are DERIVED CACHES of the measurement rows. They exist only so that
+//    filtering and sorting by severity/duration can happen in SQL. They are
+//    recomputed from scratch by `recalculateEpisode()` after every mutation
+//    that can affect them - never written ad hoc.
+//  - Taxonomy (locations, characteristics, triggers, symptoms, treatment types)
+//    is owned per user and seeded with sensible defaults at registration. That
+//    keeps "built-in" and "custom" entries uniform: the user can rename or
+//    archive anything without special-casing shared global rows.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  episodes        Episode[]
+  locations       Location[]
+  characteristics Characteristic[]
+  triggers        Trigger[]
+  symptoms        Symptom[]
+  treatmentTypes  TreatmentType[]
+
+  @@map("users")
+}
+
+model Episode {
+  id     String @id @default(cuid())
+  userId String
+
+  startedAt DateTime
+  endedAt   DateTime?
+
+  /// Free-text label for the kind of pain (e.g. "migraine", "flare-up").
+  painType    String?
+  description String?
+  notes       String?
+
+  /// Derived caches - see design notes above.
+  currentSeverity Int?
+  peakSeverity    Int?
+  minSeverity     Int?
+  /// Null while the episode is ongoing; elapsed time is computed live instead.
+  durationSeconds Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user            User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  measurements    PainMeasurement[]
+  treatments      Treatment[]
+  locations       EpisodeLocation[]
+  characteristics EpisodeCharacteristic[]
+  triggers        EpisodeTrigger[]
+  symptoms        EpisodeSymptom[]
+  linksFrom       EpisodeLink[]           @relation("EpisodeLinkFrom")
+  linksTo         EpisodeLink[]           @relation("EpisodeLinkTo")
+
+  @@index([userId, startedAt])
+  @@index([userId, endedAt])
+  // Partial-style lookup for the "what is active right now" dashboard query.
+  @@index([userId, endedAt, startedAt])
+  @@map("episodes")
+}
+
+/// Append-only severity timeline. One row per recorded reading.
+model PainMeasurement {
+  id         String   @id @default(cuid())
+  episodeId  String
+  recordedAt DateTime
+  severity   Int
+  note       String?
+  createdAt  DateTime @default(now())
+
+  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+
+  @@index([episodeId, recordedAt])
+  @@map("pain_measurements")
+}
+
+/// A treatment event. Medication fields are optional so the same table covers
+/// "took 400mg ibuprofen at 14:05" and "applied heat".
+model Treatment {
+  id        String @id @default(cuid())
+  episodeId String
+
+  treatmentTypeId String?
+  medicationName  String?
+  dose            String?
+  takenAt         DateTime
+  /// 0-100. Null means "not assessed yet".
+  effectiveness   Int?
+  notes           String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  episode       Episode        @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  treatmentType TreatmentType? @relation(fields: [treatmentTypeId], references: [id], onDelete: SetNull)
+
+  @@index([episodeId, takenAt])
+  @@index([treatmentTypeId])
+  @@map("treatments")
+}
+
+// ---------------------------------------------------------------------------
+// Taxonomy
+// ---------------------------------------------------------------------------
+
+/// Hierarchical body location. `parentId` supports "Shoulders > Left shoulder".
+model Location {
+  id        String  @id @default(cuid())
+  userId    String
+  name      String
+  slug      String
+  parentId  String?
+  /// True for rows created by the default-taxonomy seed.
+  isDefault Boolean @default(false)
+  /// Archived entries stay attached to old episodes but are hidden from pickers.
+  archived  Boolean @default(false)
+  sortOrder Int     @default(0)
+
+  createdAt DateTime @default(now())
+
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent   Location?         @relation("LocationTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children Location[]        @relation("LocationTree")
+  episodes EpisodeLocation[]
+
+  @@unique([userId, slug])
+  @@index([userId, archived])
+  @@index([parentId])
+  @@map("locations")
+}
+
+model Characteristic {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  slug      String
+  isDefault Boolean  @default(false)
+  archived  Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  user     User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  episodes EpisodeCharacteristic[]
+
+  @@unique([userId, slug])
+  @@index([userId, archived])
+  @@map("characteristics")
+}
+
+model Trigger {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  slug      String
+  isDefault Boolean  @default(false)
+  archived  Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  episodes EpisodeTrigger[]
+
+  @@unique([userId, slug])
+  @@index([userId, archived])
+  @@map("triggers")
+}
+
+model Symptom {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  slug      String
+  isDefault Boolean  @default(false)
+  archived  Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  episodes EpisodeSymptom[]
+
+  @@unique([userId, slug])
+  @@index([userId, archived])
+  @@map("symptoms")
+}
+
+model TreatmentType {
+  id           String   @id @default(cuid())
+  userId       String
+  name         String
+  slug         String
+  /// Prompts the medication name/dose fields in the treatment form.
+  isMedication Boolean  @default(false)
+  isDefault    Boolean  @default(false)
+  archived     Boolean  @default(false)
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  treatments Treatment[]
+
+  @@unique([userId, slug])
+  @@index([userId, archived])
+  @@map("treatment_types")
+}
+
+// ---------------------------------------------------------------------------
+// Join tables
+// ---------------------------------------------------------------------------
+
+model EpisodeLocation {
+  episodeId  String
+  locationId String
+
+  episode  Episode  @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@id([episodeId, locationId])
+  @@index([locationId])
+  @@map("episode_locations")
+}
+
+model EpisodeCharacteristic {
+  episodeId        String
+  characteristicId String
+
+  episode        Episode        @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  characteristic Characteristic @relation(fields: [characteristicId], references: [id], onDelete: Cascade)
+
+  @@id([episodeId, characteristicId])
+  @@index([characteristicId])
+  @@map("episode_characteristics")
+}
+
+model EpisodeTrigger {
+  episodeId String
+  triggerId String
+
+  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  trigger Trigger @relation(fields: [triggerId], references: [id], onDelete: Cascade)
+
+  @@id([episodeId, triggerId])
+  @@index([triggerId])
+  @@map("episode_triggers")
+}
+
+model EpisodeSymptom {
+  episodeId String
+  symptomId String
+
+  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  symptom Symptom @relation(fields: [symptomId], references: [id], onDelete: Cascade)
+
+  @@id([episodeId, symptomId])
+  @@index([symptomId])
+  @@map("episode_symptoms")
+}
+
+/// Relationships between episodes (e.g. a flare that is a continuation of an
+/// earlier one). The MVP has no UI for this yet; the table exists so adding it
+/// later does not require a schema rewrite.
+model EpisodeLink {
+  id        String          @id @default(cuid())
+  fromId    String
+  toId      String
+  kind      EpisodeLinkKind @default(RELATED)
+  note      String?
+  createdAt DateTime        @default(now())
+
+  from Episode @relation("EpisodeLinkFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  to   Episode @relation("EpisodeLinkTo", fields: [toId], references: [id], onDelete: Cascade)
+
+  @@unique([fromId, toId, kind])
+  @@index([toId])
+  @@map("episode_links")
+}
+
+enum EpisodeLinkKind {
+  RELATED
+  CONTINUATION
+  RECURRENCE
+}

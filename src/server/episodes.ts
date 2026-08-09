@@ -1,0 +1,587 @@
+import type { Prisma } from "@/generated/prisma/client";
+import { computeEpisodeCache } from "@/lib/episode-metrics";
+import { buildEpisodeWhere, EPISODES_PER_PAGE } from "@/lib/filters";
+import { prisma } from "@/lib/prisma";
+import type { EpisodeFilter } from "@/lib/schemas";
+
+/**
+ * Episode data access.
+ *
+ * Two rules hold everywhere in this file:
+ *
+ *  1. Every query and mutation is scoped by `userId`. Ownership is enforced in
+ *     the `where` clause rather than checked afterwards, so a wrong id returns
+ *     "not found" instead of touching another account's row.
+ *  2. Any write that can change the severity timeline or the episode window
+ *     ends with `recalculateEpisode`, which recomputes the cached
+ *     peak/min/current/duration values from the measurement rows.
+ */
+
+/** Fields needed to render an episode in a list. */
+const episodeListSelect = {
+  id: true,
+  startedAt: true,
+  endedAt: true,
+  painType: true,
+  description: true,
+  currentSeverity: true,
+  peakSeverity: true,
+  minSeverity: true,
+  durationSeconds: true,
+  locations: { select: { location: { select: { id: true, name: true } } } },
+  characteristics: {
+    select: { characteristic: { select: { id: true, name: true } } },
+  },
+} satisfies Prisma.EpisodeSelect;
+
+export type EpisodeListItem = Prisma.EpisodeGetPayload<{
+  select: typeof episodeListSelect;
+}>;
+
+const episodeDetailInclude = {
+  measurements: { orderBy: [{ recordedAt: "asc" }, { createdAt: "asc" }] },
+  treatments: {
+    orderBy: { takenAt: "asc" },
+    include: { treatmentType: { select: { id: true, name: true, isMedication: true } } },
+  },
+  locations: { include: { location: { select: { id: true, name: true } } } },
+  characteristics: {
+    include: { characteristic: { select: { id: true, name: true } } },
+  },
+  triggers: { include: { trigger: { select: { id: true, name: true } } } },
+  symptoms: { include: { symptom: { select: { id: true, name: true } } } },
+} satisfies Prisma.EpisodeInclude;
+
+export type EpisodeDetail = Prisma.EpisodeGetPayload<{
+  include: typeof episodeDetailInclude;
+}>;
+
+// ---------------------------------------------------------------------------
+// Reads
+// ---------------------------------------------------------------------------
+
+export async function getEpisode(
+  userId: string,
+  episodeId: string,
+): Promise<EpisodeDetail | null> {
+  return prisma.episode.findFirst({
+    where: { id: episodeId, userId },
+    include: episodeDetailInclude,
+  });
+}
+
+export async function getActiveEpisodes(userId: string): Promise<EpisodeDetail[]> {
+  return prisma.episode.findMany({
+    where: { userId, endedAt: null },
+    include: episodeDetailInclude,
+    orderBy: { startedAt: "desc" },
+  });
+}
+
+export async function listEpisodes(
+  userId: string,
+  filter: EpisodeFilter,
+): Promise<{ episodes: EpisodeListItem[]; total: number; pageCount: number }> {
+  const where = buildEpisodeWhere(userId, filter);
+
+  const [episodes, total] = await Promise.all([
+    prisma.episode.findMany({
+      where,
+      select: episodeListSelect,
+      orderBy: { startedAt: "desc" },
+      skip: (filter.page - 1) * EPISODES_PER_PAGE,
+      take: EPISODES_PER_PAGE,
+    }),
+    prisma.episode.count({ where }),
+  ]);
+
+  return {
+    episodes,
+    total,
+    pageCount: Math.max(1, Math.ceil(total / EPISODES_PER_PAGE)),
+  };
+}
+
+/**
+ * Episodes overlapping a date range - an episode that started earlier and is
+ * still running counts as happening on every day in between.
+ */
+export async function getEpisodesInRange(
+  userId: string,
+  from: Date,
+  to: Date,
+): Promise<EpisodeListItem[]> {
+  return prisma.episode.findMany({
+    where: {
+      userId,
+      startedAt: { lte: to },
+      OR: [{ endedAt: null }, { endedAt: { gte: from } }],
+    },
+    select: episodeListSelect,
+    orderBy: { startedAt: "asc" },
+  });
+}
+
+export async function getRecentEpisodes(
+  userId: string,
+  take = 5,
+): Promise<EpisodeListItem[]> {
+  return prisma.episode.findMany({
+    where: { userId },
+    select: episodeListSelect,
+    orderBy: { startedAt: "desc" },
+    take,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Derived-value maintenance
+// ---------------------------------------------------------------------------
+
+/**
+ * Recomputes an episode's cached severity and duration values from its
+ * measurements. Safe to call repeatedly - it derives everything from scratch.
+ */
+export async function recalculateEpisode(
+  tx: Prisma.TransactionClient,
+  episodeId: string,
+): Promise<void> {
+  const episode = await tx.episode.findUnique({
+    where: { id: episodeId },
+    select: {
+      startedAt: true,
+      endedAt: true,
+      measurements: {
+        select: { recordedAt: true, severity: true, createdAt: true },
+      },
+    },
+  });
+
+  if (!episode) return;
+
+  const cache = computeEpisodeCache(episode, episode.measurements);
+
+  await tx.episode.update({
+    where: { id: episodeId },
+    data: {
+      currentSeverity: cache.currentSeverity,
+      peakSeverity: cache.peakSeverity,
+      minSeverity: cache.minSeverity,
+      durationSeconds: cache.durationSeconds,
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Ownership helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Narrows a list of taxonomy ids to the ones this user actually owns.
+ *
+ * Ids arrive from form submissions, so they cannot be trusted: without this,
+ * a crafted request could attach another account's entries to an episode.
+ */
+async function ownedIds(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  kind: "location" | "characteristic" | "trigger" | "symptom",
+  ids: readonly string[],
+): Promise<string[]> {
+  if (ids.length === 0) return [];
+
+  const where = { userId, id: { in: [...ids] } };
+  const select = { id: true };
+
+  const rows =
+    kind === "location"
+      ? await tx.location.findMany({ where, select })
+      : kind === "characteristic"
+        ? await tx.characteristic.findMany({ where, select })
+        : kind === "trigger"
+          ? await tx.trigger.findMany({ where, select })
+          : await tx.symptom.findMany({ where, select });
+
+  return rows.map((row) => row.id);
+}
+
+async function assertOwnsEpisode(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  episodeId: string,
+): Promise<{ startedAt: Date; endedAt: Date | null }> {
+  const episode = await tx.episode.findFirst({
+    where: { id: episodeId, userId },
+    select: { startedAt: true, endedAt: true },
+  });
+
+  if (!episode) throw new EpisodeNotFoundError();
+  return episode;
+}
+
+export class EpisodeNotFoundError extends Error {
+  constructor() {
+    super("Episode not found");
+    this.name = "EpisodeNotFoundError";
+  }
+}
+
+/** Raised when a change would leave readings outside the episode's window. */
+export class WindowConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WindowConflictError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Writes
+// ---------------------------------------------------------------------------
+
+export interface CreateEpisodeData {
+  startedAt: Date;
+  endedAt: Date | null;
+  severity: number;
+  painType: string | null;
+  description: string | null;
+  notes: string | null;
+  locationIds: string[];
+  characteristicIds: string[];
+  triggerIds: string[];
+  symptomIds: string[];
+}
+
+export async function createEpisode(
+  userId: string,
+  data: CreateEpisodeData,
+): Promise<string> {
+  return prisma.$transaction(async (tx) => {
+    const [locationIds, characteristicIds, triggerIds, symptomIds] = await Promise.all([
+      ownedIds(tx, userId, "location", data.locationIds),
+      ownedIds(tx, userId, "characteristic", data.characteristicIds),
+      ownedIds(tx, userId, "trigger", data.triggerIds),
+      ownedIds(tx, userId, "symptom", data.symptomIds),
+    ]);
+
+    const episode = await tx.episode.create({
+      data: {
+        userId,
+        startedAt: data.startedAt,
+        endedAt: data.endedAt,
+        painType: data.painType,
+        description: data.description,
+        notes: data.notes,
+        // The starting severity becomes the first point on the timeline.
+        measurements: {
+          create: { recordedAt: data.startedAt, severity: data.severity },
+        },
+        locations: { create: locationIds.map((locationId) => ({ locationId })) },
+        characteristics: {
+          create: characteristicIds.map((characteristicId) => ({ characteristicId })),
+        },
+        triggers: { create: triggerIds.map((triggerId) => ({ triggerId })) },
+        symptoms: { create: symptomIds.map((symptomId) => ({ symptomId })) },
+      },
+      select: { id: true },
+    });
+
+    await recalculateEpisode(tx, episode.id);
+    return episode.id;
+  });
+}
+
+export interface UpdateEpisodeData {
+  id: string;
+  startedAt: Date;
+  endedAt: Date | null;
+  painType: string | null;
+  description: string | null;
+  notes: string | null;
+  locationIds: string[];
+  characteristicIds: string[];
+  triggerIds: string[];
+  symptomIds: string[];
+}
+
+export async function updateEpisode(
+  userId: string,
+  data: UpdateEpisodeData,
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await assertOwnsEpisode(tx, userId, data.id);
+    await assertWindowFitsMeasurements(tx, data.id, data.startedAt, data.endedAt);
+
+    const [locationIds, characteristicIds, triggerIds, symptomIds] = await Promise.all([
+      ownedIds(tx, userId, "location", data.locationIds),
+      ownedIds(tx, userId, "characteristic", data.characteristicIds),
+      ownedIds(tx, userId, "trigger", data.triggerIds),
+      ownedIds(tx, userId, "symptom", data.symptomIds),
+    ]);
+
+    await tx.episode.update({
+      where: { id: data.id },
+      data: {
+        startedAt: data.startedAt,
+        endedAt: data.endedAt,
+        painType: data.painType,
+        description: data.description,
+        notes: data.notes,
+        // Replace the tag sets wholesale - simpler than diffing, and these are
+        // small collections.
+        locations: {
+          deleteMany: {},
+          create: locationIds.map((locationId) => ({ locationId })),
+        },
+        characteristics: {
+          deleteMany: {},
+          create: characteristicIds.map((characteristicId) => ({ characteristicId })),
+        },
+        triggers: {
+          deleteMany: {},
+          create: triggerIds.map((triggerId) => ({ triggerId })),
+        },
+        symptoms: {
+          deleteMany: {},
+          create: symptomIds.map((symptomId) => ({ symptomId })),
+        },
+      },
+    });
+
+    await recalculateEpisode(tx, data.id);
+  });
+}
+
+/**
+ * Ends an episode.
+ *
+ * The closing severity, when given, is recorded as a normal timeline entry at
+ * the end time rather than overwriting anything.
+ */
+export async function endEpisode(
+  userId: string,
+  input: { id: string; endedAt: Date | null; severity: number | null; note: string | null },
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await assertOwnsEpisode(tx, userId, input.id);
+
+    const endedAt = input.endedAt ?? new Date();
+    await assertWindowFitsMeasurements(tx, input.id, null, endedAt);
+
+    if (input.severity != null) {
+      await tx.painMeasurement.create({
+        data: {
+          episodeId: input.id,
+          recordedAt: endedAt,
+          severity: input.severity,
+          note: input.note,
+        },
+      });
+    }
+
+    await tx.episode.update({ where: { id: input.id }, data: { endedAt } });
+    await recalculateEpisode(tx, input.id);
+  });
+}
+
+/** Reopens a closed episode, e.g. when the pain came back within the hour. */
+export async function reopenEpisode(userId: string, episodeId: string): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await assertOwnsEpisode(tx, userId, episodeId);
+    await tx.episode.update({ where: { id: episodeId }, data: { endedAt: null } });
+    await recalculateEpisode(tx, episodeId);
+  });
+}
+
+export async function deleteEpisode(userId: string, episodeId: string): Promise<void> {
+  // Related rows are removed by the schema's cascade rules.
+  const result = await prisma.episode.deleteMany({ where: { id: episodeId, userId } });
+  if (result.count === 0) throw new EpisodeNotFoundError();
+}
+
+export async function addMeasurement(
+  userId: string,
+  input: {
+    episodeId: string;
+    severity: number;
+    recordedAt: Date | null;
+    note: string | null;
+  },
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    const episode = await assertOwnsEpisode(tx, userId, input.episodeId);
+    const recordedAt = input.recordedAt ?? new Date();
+
+    if (recordedAt.getTime() < episode.startedAt.getTime()) {
+      throw new WindowConflictError(
+        "That reading is before the episode started. Adjust the time, or edit the episode's start time first.",
+      );
+    }
+
+    if (episode.endedAt && recordedAt.getTime() > episode.endedAt.getTime()) {
+      throw new WindowConflictError(
+        "That reading is after the episode ended. Adjust the time, or reopen the episode first.",
+      );
+    }
+
+    await tx.painMeasurement.create({
+      data: {
+        episodeId: input.episodeId,
+        severity: input.severity,
+        recordedAt,
+        note: input.note,
+      },
+    });
+
+    await recalculateEpisode(tx, input.episodeId);
+  });
+}
+
+export async function deleteMeasurement(
+  userId: string,
+  input: { id: string; episodeId: string },
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await assertOwnsEpisode(tx, userId, input.episodeId);
+
+    const remaining = await tx.painMeasurement.count({
+      where: { episodeId: input.episodeId },
+    });
+
+    // An episode with no readings has no severity at all, which breaks the
+    // timeline the whole app is built around.
+    if (remaining <= 1) {
+      throw new WindowConflictError(
+        "An episode needs at least one pain reading. Add another reading before removing this one.",
+      );
+    }
+
+    await tx.painMeasurement.deleteMany({
+      where: { id: input.id, episodeId: input.episodeId },
+    });
+
+    await recalculateEpisode(tx, input.episodeId);
+  });
+}
+
+/**
+ * Rejects a window change that would strand existing readings outside it.
+ * Passing null for either bound leaves that side unchanged.
+ */
+async function assertWindowFitsMeasurements(
+  tx: Prisma.TransactionClient,
+  episodeId: string,
+  startedAt: Date | null,
+  endedAt: Date | null,
+): Promise<void> {
+  if (!startedAt && !endedAt) return;
+
+  const [earliest, latest] = await Promise.all([
+    tx.painMeasurement.findFirst({
+      where: { episodeId },
+      orderBy: { recordedAt: "asc" },
+      select: { recordedAt: true },
+    }),
+    tx.painMeasurement.findFirst({
+      where: { episodeId },
+      orderBy: { recordedAt: "desc" },
+      select: { recordedAt: true },
+    }),
+  ]);
+
+  if (startedAt && earliest && startedAt.getTime() > earliest.recordedAt.getTime()) {
+    throw new WindowConflictError(
+      "There are pain readings before that start time. Remove or re-time them first.",
+    );
+  }
+
+  if (endedAt && latest && endedAt.getTime() < latest.recordedAt.getTime()) {
+    throw new WindowConflictError(
+      "There are pain readings after that end time. Remove or re-time them first.",
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Treatments
+// ---------------------------------------------------------------------------
+
+export interface TreatmentData {
+  episodeId: string;
+  treatmentTypeId: string | null;
+  medicationName: string | null;
+  dose: string | null;
+  takenAt: Date | null;
+  effectiveness: number | null;
+  notes: string | null;
+}
+
+export async function addTreatment(
+  userId: string,
+  data: TreatmentData,
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await assertOwnsEpisode(tx, userId, data.episodeId);
+    const treatmentTypeId = await ownedTreatmentTypeId(tx, userId, data.treatmentTypeId);
+
+    await tx.treatment.create({
+      data: {
+        episodeId: data.episodeId,
+        treatmentTypeId,
+        medicationName: data.medicationName,
+        dose: data.dose,
+        takenAt: data.takenAt ?? new Date(),
+        effectiveness: data.effectiveness,
+        notes: data.notes,
+      },
+    });
+  });
+}
+
+export async function updateTreatment(
+  userId: string,
+  data: TreatmentData & { id: string },
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await assertOwnsEpisode(tx, userId, data.episodeId);
+    const treatmentTypeId = await ownedTreatmentTypeId(tx, userId, data.treatmentTypeId);
+
+    const result = await tx.treatment.updateMany({
+      where: { id: data.id, episodeId: data.episodeId },
+      data: {
+        treatmentTypeId,
+        medicationName: data.medicationName,
+        dose: data.dose,
+        takenAt: data.takenAt ?? new Date(),
+        effectiveness: data.effectiveness,
+        notes: data.notes,
+      },
+    });
+
+    if (result.count === 0) throw new EpisodeNotFoundError();
+  });
+}
+
+export async function deleteTreatment(
+  userId: string,
+  input: { id: string; episodeId: string },
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await assertOwnsEpisode(tx, userId, input.episodeId);
+    await tx.treatment.deleteMany({
+      where: { id: input.id, episodeId: input.episodeId },
+    });
+  });
+}
+
+async function ownedTreatmentTypeId(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  treatmentTypeId: string | null,
+): Promise<string | null> {
+  if (!treatmentTypeId) return null;
+  const type = await tx.treatmentType.findFirst({
+    where: { id: treatmentTypeId, userId },
+    select: { id: true },
+  });
+  return type?.id ?? null;
+}

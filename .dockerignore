@@ -1,0 +1,22 @@
+node_modules
+.next
+.git
+.gitignore
+npm-debug.log*
+coverage
+backups
+tests
+*.md
+!README.md
+
+# Never bake secrets or a developer's local database URL into an image.
+.env
+.env.*
+!.env.example
+
+# Editor/agent tooling
+.claude
+.agents
+.windsurf
+.vscode
+.idea
