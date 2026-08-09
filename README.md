@@ -62,6 +62,7 @@ cp .env.example .env
 | `AUTH_SECRET` | **yes** | — | Signs session cookies. At least 32 characters. |
 | `SESSION_DAYS` | no | `30` | How long a session stays valid. |
 | `ALLOW_REGISTRATION` | no | `false` | Whether `/register` is open. The **first** account can always be created regardless. |
+| `TZ` | no | `America/Los_Angeles` | Your timezone. See below — get this wrong and every time in the app is wrong. |
 | `APP_PORT` | no | `3000` | Host port the app is published on. |
 | `DB_PORT` | no | `5432` | Host port the database is published on (loopback only). |
 
@@ -73,6 +74,49 @@ openssl rand -base64 48
 
 The app refuses to start without `DATABASE_URL` and `AUTH_SECRET`, rather than
 running with an insecure default.
+
+### Setting your timezone
+
+A container has no idea where you are; left alone it runs on UTC, so "now" would
+be recorded and displayed several hours away from your actual clock. `TZ` is the
+single setting that fixes this. There is no per-user timezone in the app — it is
+built for one person, and one setting is simpler than a per-account one that
+would have to be right in the database too.
+
+```dotenv
+TZ=America/Los_Angeles
+```
+
+**Use an IANA zone name, never an abbreviation.** `America/Los_Angeles` switches
+between PST and PDT on the right dates by itself.
+
+Writing `TZ=PST` is worse than it looks. It does not fail, and it does not give
+you UTC-8 — the container runs at **UTC+0** while still labelling itself
+"Pacific Standard Time". Every time in the app would be eight hours out and
+nothing would look wrong. `TZ=EST` behaves the same way. Both are rejected at
+startup with a message naming the zone you meant.
+
+Common zones: `America/Los_Angeles`, `America/Denver`, `America/Chicago`,
+`America/New_York`, `Europe/London`, `Europe/Berlin`, `Asia/Tokyo`,
+`Australia/Sydney`, `UTC`.
+
+Startup checks two things: that the name is one Node recognises, and that the
+clock the process actually runs on matches the zone the name refers to. Either
+failing stops the container instead of quietly serving wrong times. On success it
+prints the clock it is using:
+
+```
+Clock: Sun Aug 09 2026 13:56:24 GMT-0700 (Pacific Daylight Time)
+```
+
+Changing `TZ` later is safe: instants are stored in UTC and are not rewritten,
+so nothing is corrupted. Existing entries will simply be *displayed* on the new
+clock. If some were typed in while the timezone was wrong, those readings will
+move by the difference — worth a look over your history after a change.
+
+Only the app gets a timezone. The database container is deliberately left on UTC,
+because its timestamp columns carry no zone and the app reads them as UTC; giving
+PostgreSQL a local zone would shift the values it writes itself.
 
 ---
 

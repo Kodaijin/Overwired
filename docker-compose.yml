@@ -6,6 +6,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-pain}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required - copy .env.example to .env}
       POSTGRES_DB: ${POSTGRES_DB:-paintracker}
+      # Deliberately NOT given TZ. Timestamps are stored without a zone and are
+      # read back as UTC, so the database must keep writing its CURRENT_TIMESTAMP
+      # defaults in UTC. Setting a local zone here would shift them. The app's TZ
+      # is what decides how times are read from forms and shown on screen.
     volumes:
       # Named volume => data survives `docker compose down` and container rebuilds.
       - pgdata:/var/lib/postgresql/data
@@ -32,6 +36,9 @@ services:
       AUTH_SECRET: ${AUTH_SECRET:?AUTH_SECRET is required - generate one with `openssl rand -base64 48`}
       SESSION_DAYS: ${SESSION_DAYS:-30}
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+      # Your local timezone. This is the clock the app reads times as when you
+      # type them, and the clock it shows them on.
+      TZ: ${TZ:-America/Los_Angeles}
       NODE_ENV: production
       PORT: 3000
       HOSTNAME: 0.0.0.0
