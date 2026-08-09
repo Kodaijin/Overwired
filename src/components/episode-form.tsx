@@ -28,6 +28,10 @@ export interface EpisodeFormValues {
   characteristicIds: string[];
   triggerIds: string[];
   symptomIds: string[];
+  /** The first reading on the timeline. */
+  startSeverity: number | null;
+  /** The reading taken at the end time, if one was recorded. */
+  endSeverity: number | null;
 }
 
 /**
@@ -80,10 +84,18 @@ export function EpisodeForm({
           {mode === "create" ? (
             <SeverityPicker name="severity" label="How bad is it right now?" />
           ) : (
-            <p className="text-muted-foreground text-sm">
-              Pain levels are kept as a timeline. Add or remove readings from the
-              episode page rather than editing them here.
-            </p>
+            <div className="space-y-2">
+              <SeverityPicker
+                name="startSeverity"
+                label="Pain level at the start"
+                defaultValue={values?.startSeverity}
+              />
+              <p className="text-muted-foreground text-sm">
+                Corrects the first reading. Readings from during the episode are
+                added and removed on the episode page, so changing this cannot
+                erase how the pain actually moved.
+              </p>
+            </div>
           )}
 
           <TaxonomyChips
@@ -192,6 +204,22 @@ export function EpisodeForm({
             defaultValue={values?.endedAt}
             hint="Leave this empty while the pain is still going."
           />
+
+          {mode === "edit" && (
+            <div className="space-y-2">
+              <SeverityPicker
+                name="endSeverity"
+                label="Pain level when it ended"
+                required={false}
+                defaultValue={values?.endSeverity}
+              />
+              <p className="text-muted-foreground text-sm">
+                {values?.endSeverity == null
+                  ? "Only if the episode has an end time. Choosing a level adds a reading at that time."
+                  : "Corrects the reading recorded at the end time."}
+              </p>
+            </div>
+          )}
         </div>
       </details>
 

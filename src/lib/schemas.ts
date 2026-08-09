@@ -159,12 +159,32 @@ export const createEpisodeSchema = z
   })
   .superRefine(checkChronology);
 
+/**
+ * Editing an episode can correct the pain level it started and ended at.
+ *
+ * These two are corrections to the ends of the timeline, not a way to record
+ * change over time - the readings in between are added and removed from the
+ * episode page. Omitting either leaves that reading exactly as it was.
+ */
 export const updateEpisodeSchema = z
   .object({
     id: idSchema,
     ...episodeCoreShape,
+    startSeverity: severitySchema.nullish().transform((value) => value ?? null),
+    endSeverity: severitySchema.nullish().transform((value) => value ?? null),
   })
-  .superRefine(checkChronology);
+  .superRefine((data, ctx) => {
+    checkChronology(data, ctx);
+
+    // An episode that has not ended has no level to have ended at.
+    if (data.endSeverity != null && data.endedAt == null) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Add an end time before recording the level it ended at",
+        path: ["endSeverity"],
+      });
+    }
+  });
 
 export const endEpisodeSchema = z.object({
   id: idSchema,

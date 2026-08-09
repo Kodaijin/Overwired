@@ -18,6 +18,7 @@ import {
   updateEpisode,
   WindowConflictError,
   type TreatmentEntry,
+  type UpdateEpisodeData,
 } from "@/server/episodes";
 
 /**
@@ -412,6 +413,231 @@ runIfDatabase("episode lifecycle", () => {
           symptomIds: [],
         }),
       ).rejects.toBeInstanceOf(EpisodeNotFoundError);
+    });
+  });
+
+  describe("correcting the start and end pain level", () => {
+    const START = at("2024-03-01T10:00:00Z");
+    const END = at("2024-03-01T14:00:00Z");
+
+    /** An edit that changes nothing except what the overrides say. */
+    function edit(id: string, overrides: Partial<UpdateEpisodeData> = {}) {
+      return updateEpisode(userId, {
+        id,
+        startedAt: START,
+        endedAt: null,
+        painType: null,
+        description: null,
+        notes: null,
+        locationIds: [],
+        characteristicIds: [],
+        triggerIds: [],
+        symptomIds: [],
+        ...overrides,
+      });
+    }
+
+    it("corrects the first reading in place instead of adding one", async () => {
+      const id = await createEpisode(
+        userId,
+        baseEpisode({ startedAt: START, severity: 4 }),
+      );
+
+      await edit(id, { startSeverity: 8 });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.measurements).toHaveLength(1);
+      expect(episode!.measurements[0].severity).toBe(8);
+      // The reading keeps its place on the timeline.
+      expect(episode!.measurements[0].recordedAt).toEqual(START);
+    });
+
+    it("recomputes the cached peak and current values", async () => {
+      const id = await createEpisode(
+        userId,
+        baseEpisode({ startedAt: START, severity: 9 }),
+      );
+
+      await edit(id, { startSeverity: 3 });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.peakSeverity).toBe(3);
+      expect(episode!.minSeverity).toBe(3);
+      expect(episode!.currentSeverity).toBe(3);
+    });
+
+    it("leaves readings from during the episode alone", async () => {
+      const id = await createEpisode(
+        userId,
+        baseEpisode({ startedAt: START, severity: 4 }),
+      );
+      await addMeasurement(userId, {
+        episodeId: id,
+        severity: 9,
+        recordedAt: at("2024-03-01T11:00:00Z"),
+        note: null,
+      });
+      await addMeasurement(userId, {
+        episodeId: id,
+        severity: 6,
+        recordedAt: at("2024-03-01T12:00:00Z"),
+        note: null,
+      });
+
+      await edit(id, { startSeverity: 2 });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.measurements.map((m) => m.severity)).toEqual([2, 9, 6]);
+      // The peak still comes from the untouched middle reading.
+      expect(episode!.peakSeverity).toBe(9);
+    });
+
+    it("corrects the closing reading when one was recorded at the end time", async () => {
+      const id = await createEpisode(
+        userId,
+        baseEpisode({ startedAt: START, severity: 4 }),
+      );
+      await endEpisode(userId, { id, endedAt: END, severity: 3, note: null });
+
+      await edit(id, { endedAt: END, endSeverity: 1 });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.measurements).toHaveLength(2);
+      expect(episode!.measurements[1].severity).toBe(1);
+      expect(episode!.currentSeverity).toBe(1);
+    });
+
+    it("adds a closing reading when the episode ended without one", async () => {
+      const id = await createEpisode(
+        userId,
+        baseEpisode({ startedAt: START, severity: 7 }),
+      );
+      await endEpisode(userId, { id, endedAt: END, severity: null, note: null });
+
+      const before = await getEpisode(userId, id);
+      expect(before!.measurements).toHaveLength(1);
+
+      await edit(id, { endedAt: END, endSeverity: 2 });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.measurements).toHaveLength(2);
+      expect(episode!.measurements[1].recordedAt).toEqual(END);
+      expect(episode!.measurements[1].severity).toBe(2);
+      expect(episode!.minSeverity).toBe(2);
+    });
+
+    it("changes both ends in one edit", async () => {
+      const id = await createEpisode(
+        userId,
+        baseEpisode({ startedAt: START, severity: 4 }),
+      );
+      await endEpisode(userId, { id, endedAt: END, severity: 3, note: null });
+
+      await edit(id, { endedAt: END, startSeverity: 8, endSeverity: 1 });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.measurements.map((m) => m.severity)).toEqual([8, 1]);
+      expect(episode!.peakSeverity).toBe(8);
+    });
+
+    it("touches nothing when no levels are given", async () => {
+      const id = await createEpisode(
+        userId,
+        baseEpisode({ startedAt: START, severity: 5 }),
+      );
+      await endEpisode(userId, { id, endedAt: END, severity: 2, note: null });
+
+      await edit(id, { endedAt: END, painType: "renamed" });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.painType).toBe("renamed");
+      expect(episode!.measurements.map((m) => m.severity)).toEqual([5, 2]);
+    });
+
+    it("accepts zero as a real level rather than treating it as absent", async () => {
+      const id = await createEpisode(
+        userId,
+        baseEpisode({ startedAt: START, severity: 5 }),
+      );
+
+      await edit(id, { startSeverity: 0 });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.measurements[0].severity).toBe(0);
+      expect(episode!.peakSeverity).toBe(0);
+    });
+
+    it("refuses two different levels when one reading is both ends", async () => {
+      // A zero-length episode: its single reading is the start and the end.
+      const id = await createEpisode(
+        userId,
+        baseEpisode({ startedAt: START, severity: 5 }),
+      );
+      await endEpisode(userId, { id, endedAt: START, severity: null, note: null });
+
+      await expect(
+        edit(id, { endedAt: START, startSeverity: 8, endSeverity: 2 }),
+      ).rejects.toBeInstanceOf(WindowConflictError);
+
+      // Nothing was written - the transaction rolled the whole edit back.
+      const episode = await getEpisode(userId, id);
+      expect(episode!.measurements).toHaveLength(1);
+      expect(episode!.measurements[0].severity).toBe(5);
+    });
+
+    it("allows the same level at both ends of a zero-length episode", async () => {
+      const id = await createEpisode(
+        userId,
+        baseEpisode({ startedAt: START, severity: 5 }),
+      );
+      await endEpisode(userId, { id, endedAt: START, severity: null, note: null });
+
+      await edit(id, { endedAt: START, startSeverity: 6, endSeverity: 6 });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.measurements).toHaveLength(1);
+      expect(episode!.measurements[0].severity).toBe(6);
+    });
+
+    it("ignores an ending level while the episode is still going", async () => {
+      const id = await createEpisode(
+        userId,
+        baseEpisode({ startedAt: START, severity: 5 }),
+      );
+
+      // The schema rejects this before it reaches here; the data layer must not
+      // invent a closing reading for an episode with no end.
+      await edit(id, { endedAt: null, endSeverity: 2 });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.measurements).toHaveLength(1);
+      expect(episode!.measurements[0].severity).toBe(5);
+    });
+
+    it("will not correct another account's readings", async () => {
+      const id = await createEpisode(
+        userId,
+        baseEpisode({ startedAt: START, severity: 5 }),
+      );
+
+      await expect(
+        updateEpisode(otherUserId, {
+          id,
+          startedAt: START,
+          endedAt: null,
+          painType: null,
+          description: null,
+          notes: null,
+          locationIds: [],
+          characteristicIds: [],
+          triggerIds: [],
+          symptomIds: [],
+          startSeverity: 0,
+        }),
+      ).rejects.toBeInstanceOf(EpisodeNotFoundError);
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.measurements[0].severity).toBe(5);
     });
   });
 

@@ -342,6 +342,13 @@ that filtering and sorting can happen in SQL, and they are recomputed from
 scratch by a single function after any write that could affect them, so the
 cache cannot drift.
 
+**Corrections are separate from changes over time.** Editing an episode can fix
+the pain level it started and ended at — those are the two readings you are most
+likely to have mistyped, and they are corrected in place rather than by
+appending a contradictory reading at the same instant. Readings from *during* an
+episode are only added and removed on the episode page, so the edit form cannot
+be used to quietly flatten how the pain actually moved.
+
 **Taxonomy is owned per user.** Locations, characteristics, triggers, symptoms
 and treatment types are seeded per account rather than shared globally. That
 makes built-in and custom entries behave identically — you can rename or

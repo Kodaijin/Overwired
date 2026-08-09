@@ -132,6 +132,8 @@ export async function updateEpisodeAction(
     const parsed = updateEpisodeSchema.safeParse({
       id: text(formData, "id"),
       ...readEpisodeFields(formData),
+      startSeverity: number(formData, "startSeverity"),
+      endSeverity: number(formData, "endSeverity"),
     });
 
     if (!parsed.success) return validationError(parsed.error);

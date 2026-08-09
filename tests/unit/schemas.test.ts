@@ -9,6 +9,7 @@ import {
   passwordSchema,
   severitySchema,
   treatmentSchema,
+  updateEpisodeSchema,
 } from "@/lib/schemas";
 
 /**
@@ -144,6 +145,69 @@ describe("createEpisodeSchema", () => {
     expect(
       createEpisodeSchema.safeParse({ ...baseEpisode, severity: 11 }).success,
     ).toBe(false);
+  });
+});
+
+describe("updateEpisodeSchema", () => {
+  const baseUpdate = {
+    id: "ep1",
+    startedAt: "2024-03-01T10:00",
+  };
+
+  it("leaves both boundary levels null when they are not given", () => {
+    const parsed = updateEpisodeSchema.parse(baseUpdate);
+    expect(parsed.startSeverity).toBeNull();
+    expect(parsed.endSeverity).toBeNull();
+  });
+
+  it("accepts corrections to the start and end levels", () => {
+    const parsed = updateEpisodeSchema.parse({
+      ...baseUpdate,
+      endedAt: "2024-03-01T14:00",
+      startSeverity: 6,
+      endSeverity: 2,
+    });
+
+    expect(parsed.startSeverity).toBe(6);
+    expect(parsed.endSeverity).toBe(2);
+  });
+
+  it("keeps zero, which is a real pain level and not an absent one", () => {
+    const parsed = updateEpisodeSchema.parse({
+      ...baseUpdate,
+      endedAt: "2024-03-01T14:00",
+      startSeverity: 0,
+      endSeverity: 0,
+    });
+
+    expect(parsed.startSeverity).toBe(0);
+    expect(parsed.endSeverity).toBe(0);
+  });
+
+  it("refuses an ending level on an episode that has not ended", () => {
+    const result = updateEpisodeSchema.safeParse({ ...baseUpdate, endSeverity: 3 });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.path).toEqual(["endSeverity"]);
+  });
+
+  it("rejects a boundary level outside the scale", () => {
+    expect(
+      updateEpisodeSchema.safeParse({ ...baseUpdate, startSeverity: 11 }).success,
+    ).toBe(false);
+    expect(
+      updateEpisodeSchema.safeParse({ ...baseUpdate, startSeverity: -1 }).success,
+    ).toBe(false);
+  });
+
+  it("still enforces the episode's chronology", () => {
+    const result = updateEpisodeSchema.safeParse({
+      ...baseUpdate,
+      endedAt: "2024-03-01T09:00",
+      startSeverity: 5,
+    });
+
+    expect(result.success).toBe(false);
   });
 });
 

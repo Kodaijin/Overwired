@@ -301,6 +301,9 @@ export interface UpdateEpisodeData {
   characteristicIds: string[];
   triggerIds: string[];
   symptomIds: string[];
+  /** Corrections to the ends of the timeline; null leaves them untouched. */
+  startSeverity?: number | null;
+  endSeverity?: number | null;
 }
 
 export async function updateEpisode(
@@ -347,8 +350,83 @@ export async function updateEpisode(
       },
     });
 
+    await applyBoundarySeverities(tx, data.id, data.endedAt, {
+      start: data.startSeverity ?? null,
+      end: data.endSeverity ?? null,
+    });
+
     await recalculateEpisode(tx, data.id);
   });
+}
+
+/**
+ * Corrects the pain level an episode started and ended at.
+ *
+ * This is deliberately narrow. The first reading is edited in place, because
+ * it is the same reading the user is looking at when they say "I typed the
+ * wrong number" - appending a second reading at the same instant would leave
+ * the timeline claiming two different levels at once. Readings in between are
+ * never touched here; they are added and removed from the episode page, so the
+ * edit form cannot be used to quietly flatten how the pain actually changed.
+ *
+ * The ending level attaches to the reading recorded at the end time. If there
+ * is no such reading - the episode was ended without one - it is added.
+ */
+async function applyBoundarySeverities(
+  tx: Prisma.TransactionClient,
+  episodeId: string,
+  endedAt: Date | null,
+  severities: { start: number | null; end: number | null },
+): Promise<void> {
+  if (severities.start == null && severities.end == null) return;
+
+  const measurements = await tx.painMeasurement.findMany({
+    where: { episodeId },
+    orderBy: [{ recordedAt: "asc" }, { createdAt: "asc" }],
+    select: { id: true, severity: true, recordedAt: true },
+  });
+
+  const first = measurements[0];
+  const last = measurements[measurements.length - 1];
+  const endReading =
+    endedAt && last && last.recordedAt.getTime() === endedAt.getTime() ? last : null;
+
+  // A zero-length episode's single reading is both its start and its end, so
+  // it cannot be two different numbers.
+  if (
+    severities.start != null &&
+    severities.end != null &&
+    first &&
+    endReading &&
+    first.id === endReading.id &&
+    severities.start !== severities.end
+  ) {
+    throw new WindowConflictError(
+      "This episode has one reading covering both its start and its end, so they cannot be different levels. Add a reading from the episode page to record the change.",
+    );
+  }
+
+  if (severities.start != null && first && first.severity !== severities.start) {
+    await tx.painMeasurement.update({
+      where: { id: first.id },
+      data: { severity: severities.start },
+    });
+  }
+
+  if (severities.end != null && endedAt) {
+    if (endReading) {
+      if (endReading.severity !== severities.end) {
+        await tx.painMeasurement.update({
+          where: { id: endReading.id },
+          data: { severity: severities.end },
+        });
+      }
+    } else {
+      await tx.painMeasurement.create({
+        data: { episodeId, recordedAt: endedAt, severity: severities.end },
+      });
+    }
+  }
 }
 
 /**

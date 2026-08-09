@@ -20,11 +20,22 @@ export default async function EditEpisodePage(props: PageProps<"/episodes/[id]/e
 
   if (!episode) notFound();
 
+  // `getEpisode` returns the timeline in chronological order.
+  const first = episode.measurements[0];
+  const last = episode.measurements[episode.measurements.length - 1];
+
+  // Only a reading taken at the end time counts as the level it ended at - an
+  // episode ended without one has nothing to show here yet.
+  const endSeverity =
+    episode.endedAt && last && last.recordedAt.getTime() === episode.endedAt.getTime()
+      ? last.severity
+      : null;
+
   return (
     <>
       <PageHeader
         title="Edit episode"
-        description="Correct the details of this episode. Pain readings are edited from the episode page."
+        description="Correct the details of this episode, including the pain level it started and ended at. Readings from during the episode are edited on the episode page."
       />
       <EpisodeForm
         mode="edit"
@@ -33,6 +44,8 @@ export default async function EditEpisodePage(props: PageProps<"/episodes/[id]/e
           id: episode.id,
           startedAt: episode.startedAt,
           endedAt: episode.endedAt,
+          startSeverity: first?.severity ?? null,
+          endSeverity,
           painType: episode.painType,
           description: episode.description,
           notes: episode.notes,
