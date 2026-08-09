@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import type { z } from "zod";
 
 import { requireUser } from "@/lib/auth/user";
 import {
@@ -14,16 +15,17 @@ import {
 import { list, number, text } from "@/lib/form-data";
 import {
   addMeasurementSchema,
+  addTreatmentsSchema,
   createEpisodeSchema,
   deleteEpisodeSchema,
   deleteMeasurementSchema,
   deleteTreatmentSchema,
   endEpisodeSchema,
   reopenEpisodeSchema,
-  treatmentSchema,
   updateEpisodeSchema,
   updateTreatmentSchema,
 } from "@/lib/schemas";
+import { readRow, readTreatmentRows } from "@/lib/treatment-rows";
 import * as episodes from "@/server/episodes";
 import { EpisodeNotFoundError, WindowConflictError } from "@/server/episodes";
 
@@ -246,16 +248,46 @@ export async function deleteEpisodeAction(
 // Treatments
 // ---------------------------------------------------------------------------
 
-function readTreatmentFields(formData: FormData) {
-  return {
-    episodeId: text(formData, "episodeId"),
-    treatmentTypeId: text(formData, "treatmentTypeId"),
-    medicationName: text(formData, "medicationName"),
-    dose: text(formData, "dose"),
-    takenAt: text(formData, "takenAt"),
-    effectiveness: number(formData, "effectiveness"),
-    notes: text(formData, "notes"),
-  };
+/** Field names are internal; the alert has to name the row a person can see. */
+const TREATMENT_FIELD_LABELS: Record<string, string> = {
+  treatmentTypeId: "treatment",
+  medicationName: "medication name",
+  dose: "dose",
+  takenAt: "time",
+  effectiveness: "effectiveness",
+  notes: "notes",
+};
+
+/**
+ * Turns `treatments.1.dose` into "Treatment 2 - dose".
+ *
+ * The shared `validationError` groups by the first path segment, which for a
+ * list of rows would collapse every row's problems under one heading.
+ */
+function treatmentValidationError(error: z.ZodError<unknown>): ActionResult<never> {
+  const fieldErrors: Record<string, string[]> = {};
+
+  for (const issue of error.issues) {
+    const [head, index, field] = issue.path;
+    const key =
+      head === "treatments" && typeof index === "number"
+        ? `Treatment ${index + 1}${
+            typeof field === "string"
+              ? ` - ${TREATMENT_FIELD_LABELS[field] ?? field}`
+              : ""
+          }`
+        : typeof head === "string"
+          ? head
+          : "Treatment";
+
+    (fieldErrors[key] ??= []).push(issue.message);
+  }
+
+  const first = Object.values(fieldErrors)[0]?.[0];
+  return actionError(
+    first ?? "Please check the highlighted fields and try again.",
+    fieldErrors,
+  );
 }
 
 export async function addTreatmentAction(
@@ -265,10 +297,18 @@ export async function addTreatmentAction(
   const user = await requireUser();
 
   return runDomain("addTreatmentAction", async () => {
-    const parsed = treatmentSchema.safeParse(readTreatmentFields(formData));
-    if (!parsed.success) return validationError(parsed.error);
+    const parsed = addTreatmentsSchema.safeParse({
+      episodeId: text(formData, "episodeId"),
+      treatments: readTreatmentRows(formData),
+    });
 
-    await episodes.addTreatment(user.id, parsed.data);
+    if (!parsed.success) return treatmentValidationError(parsed.error);
+
+    await episodes.addTreatments(
+      user.id,
+      parsed.data.episodeId,
+      parsed.data.treatments,
+    );
     refreshEpisodeViews(parsed.data.episodeId);
     return actionOk();
   });
@@ -283,7 +323,8 @@ export async function updateTreatmentAction(
   return runDomain("updateTreatmentAction", async () => {
     const parsed = updateTreatmentSchema.safeParse({
       id: text(formData, "id"),
-      ...readTreatmentFields(formData),
+      episodeId: text(formData, "episodeId"),
+      ...readRow(formData, ""),
     });
     if (!parsed.success) return validationError(parsed.error);
 

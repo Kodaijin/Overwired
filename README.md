@@ -348,6 +348,13 @@ makes built-in and custom entries behave identically — you can rename or
 archive anything without special cases. Entries are archived, never deleted, so
 an old episode keeps its labels.
 
+**Treatments are recorded one row per thing tried.** Responding to pain is
+rarely a single action, so several treatments can be entered in one submission —
+but each is stored separately, with its own time, dose and effectiveness. Rolled
+into one entry they could not answer "was it the ibuprofen or the lying down?".
+The whole submission is written in one transaction, so a rejected row leaves
+nothing half-recorded.
+
 **Date filters use overlap, not containment.** An episode that started before
 the range and is still going *is* happening during the range, so it matches.
 Filtering on the start time alone would hide exactly the long episodes most

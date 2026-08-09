@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   addMeasurementSchema,
+  addTreatmentsSchema,
   createEpisodeSchema,
   effectivenessSchema,
   emailSchema,
@@ -159,10 +160,20 @@ describe("addMeasurementSchema", () => {
 });
 
 describe("treatmentSchema", () => {
-  it("accepts a treatment with nothing but an episode", () => {
-    const parsed = treatmentSchema.parse({ episodeId: "abc" });
+  it("accepts a treatment identified only by its type", () => {
+    const parsed = treatmentSchema.parse({ episodeId: "abc", treatmentTypeId: "heat" });
     expect(parsed.effectiveness).toBeNull();
     expect(parsed.medicationName).toBeNull();
+  });
+
+  it("accepts a treatment identified only by name", () => {
+    const parsed = treatmentSchema.parse({ episodeId: "abc", medicationName: "Ibuprofen" });
+    expect(parsed.treatmentTypeId).toBeNull();
+  });
+
+  it("rejects a treatment that says nothing about what was tried", () => {
+    const result = treatmentSchema.safeParse({ episodeId: "abc" });
+    expect(result.success).toBe(false);
   });
 
   it("keeps medication details when given", () => {
@@ -176,6 +187,81 @@ describe("treatmentSchema", () => {
     expect(parsed.medicationName).toBe("Ibuprofen");
     expect(parsed.dose).toBe("400mg");
     expect(parsed.effectiveness).toBe(75);
+  });
+});
+
+describe("addTreatmentsSchema", () => {
+  const entry = (extra: Record<string, unknown> = {}) => ({
+    treatmentTypeId: "medication",
+    medicationName: "Ibuprofen",
+    ...extra,
+  });
+
+  it("accepts several treatments at once and keeps them separate", () => {
+    const parsed = addTreatmentsSchema.parse({
+      episodeId: "abc",
+      treatments: [
+        entry({ dose: "400mg", effectiveness: 75 }),
+        { treatmentTypeId: "heat", notes: "20 minutes" },
+        { medicationName: "Lay down in the dark" },
+      ],
+    });
+
+    expect(parsed.treatments).toHaveLength(3);
+    expect(parsed.treatments[0].dose).toBe("400mg");
+    expect(parsed.treatments[0].effectiveness).toBe(75);
+    expect(parsed.treatments[1].notes).toBe("20 minutes");
+    expect(parsed.treatments[2].treatmentTypeId).toBeNull();
+  });
+
+  it("keeps each row's time independent", () => {
+    const parsed = addTreatmentsSchema.parse({
+      episodeId: "abc",
+      treatments: [
+        entry({ takenAt: "2024-03-01T14:30" }),
+        entry({ medicationName: "Paracetamol" }),
+      ],
+    });
+
+    expect(parsed.treatments[0].takenAt).toEqual(new Date("2024-03-01T14:30"));
+    // Blank means "now", decided at write time rather than here.
+    expect(parsed.treatments[1].takenAt).toBeNull();
+  });
+
+  it("rejects the whole submission when one row is blank", () => {
+    const result = addTreatmentsSchema.safeParse({
+      episodeId: "abc",
+      treatments: [entry(), {}],
+    });
+
+    expect(result.success).toBe(false);
+    // The path identifies the offending row so the form can name it.
+    expect(result.error?.issues[0]?.path).toEqual(["treatments", 1, "treatmentTypeId"]);
+  });
+
+  it("rejects a submission with no treatments at all", () => {
+    expect(
+      addTreatmentsSchema.safeParse({ episodeId: "abc", treatments: [] }).success,
+    ).toBe(false);
+  });
+
+  it("refuses an implausible number of rows", () => {
+    const result = addTreatmentsSchema.safeParse({
+      episodeId: "abc",
+      treatments: Array.from({ length: 11 }, () => entry()),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("reports a bad value against the row it came from", () => {
+    const result = addTreatmentsSchema.safeParse({
+      episodeId: "abc",
+      treatments: [entry(), entry({ effectiveness: 150 })],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.path).toEqual(["treatments", 1, "effectiveness"]);
   });
 });
 

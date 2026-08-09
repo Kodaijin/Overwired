@@ -6,6 +6,7 @@ import { seedDefaultTaxonomy } from "@/lib/taxonomy";
 import {
   addMeasurement,
   addTreatment,
+  addTreatments,
   createEpisode,
   deleteEpisode,
   deleteMeasurement,
@@ -16,6 +17,7 @@ import {
   reopenEpisode,
   updateEpisode,
   WindowConflictError,
+  type TreatmentEntry,
 } from "@/server/episodes";
 
 /**
@@ -410,6 +412,114 @@ runIfDatabase("episode lifecycle", () => {
           symptomIds: [],
         }),
       ).rejects.toBeInstanceOf(EpisodeNotFoundError);
+    });
+  });
+
+  describe("recording treatments", () => {
+    const entry = (overrides: Partial<TreatmentEntry> = {}): TreatmentEntry => ({
+      treatmentTypeId: null,
+      medicationName: null,
+      dose: null,
+      takenAt: null,
+      effectiveness: null,
+      notes: null,
+      ...overrides,
+    });
+
+    it("writes every row of one submission", async () => {
+      const id = await createEpisode(userId, baseEpisode());
+
+      const count = await addTreatments(userId, id, [
+        entry({
+          treatmentTypeId,
+          medicationName: "Ibuprofen",
+          dose: "400mg",
+          takenAt: at("2024-03-01T10:30:00Z"),
+          effectiveness: 75,
+        }),
+        entry({ medicationName: "Heat pack", takenAt: at("2024-03-01T10:35:00Z") }),
+        entry({ medicationName: "Dark room", takenAt: at("2024-03-01T10:40:00Z") }),
+      ]);
+
+      expect(count).toBe(3);
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.treatments).toHaveLength(3);
+
+      // Each keeps its own details rather than being merged into one entry.
+      const [first, second, third] = episode!.treatments;
+      expect(first.medicationName).toBe("Ibuprofen");
+      expect(first.dose).toBe("400mg");
+      expect(first.effectiveness).toBe(75);
+      expect(second.medicationName).toBe("Heat pack");
+      expect(second.effectiveness).toBeNull();
+      expect(third.medicationName).toBe("Dark room");
+    });
+
+    it("gives rows with no time of their own the same timestamp", async () => {
+      const id = await createEpisode(userId, baseEpisode());
+      const before = new Date();
+
+      await addTreatments(userId, id, [
+        entry({ medicationName: "Ibuprofen" }),
+        entry({ medicationName: "Heat pack" }),
+      ]);
+
+      const episode = await getEpisode(userId, id);
+      const [first, second] = episode!.treatments;
+
+      expect(first.takenAt.getTime()).toBe(second.takenAt.getTime());
+      expect(first.takenAt.getTime()).toBeGreaterThanOrEqual(before.getTime() - 1000);
+    });
+
+    it("writes nothing at all when the episode is not the caller's", async () => {
+      const id = await createEpisode(userId, baseEpisode());
+
+      await expect(
+        addTreatments(otherUserId, id, [entry({ medicationName: "Ibuprofen" })]),
+      ).rejects.toBeInstanceOf(EpisodeNotFoundError);
+
+      expect(await prisma.treatment.count({ where: { episodeId: id } })).toBe(0);
+    });
+
+    it("drops a treatment type belonging to another account", async () => {
+      const id = await createEpisode(userId, baseEpisode());
+      const foreign = await prisma.treatmentType.findFirst({
+        where: { userId: otherUserId, slug: "medication" },
+        select: { id: true },
+      });
+
+      await addTreatments(userId, id, [
+        entry({ treatmentTypeId: foreign!.id, medicationName: "Ibuprofen" }),
+        entry({ treatmentTypeId, medicationName: "Paracetamol" }),
+      ]);
+
+      const episode = await getEpisode(userId, id);
+      const byName = new Map(
+        episode!.treatments.map((t) => [t.medicationName, t.treatmentTypeId]),
+      );
+
+      // The row is still recorded - only the borrowed classification is dropped.
+      expect(byName.get("Ibuprofen")).toBeNull();
+      expect(byName.get("Paracetamol")).toBe(treatmentTypeId);
+    });
+
+    it("records a single treatment through the same path", async () => {
+      const id = await createEpisode(userId, baseEpisode());
+
+      await addTreatment(userId, {
+        episodeId: id,
+        treatmentTypeId,
+        medicationName: "Ibuprofen",
+        dose: "400mg",
+        takenAt: null,
+        effectiveness: 50,
+        notes: null,
+      });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.treatments).toHaveLength(1);
+      expect(episode!.treatments[0].treatmentTypeId).toBe(treatmentTypeId);
     });
   });
 

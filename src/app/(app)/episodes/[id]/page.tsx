@@ -146,7 +146,8 @@ export default async function EpisodePage(props: PageProps<"/episodes/[id]">) {
             <CardHeader>
               <CardTitle>Record a treatment</CardTitle>
               <CardDescription>
-                What you tried, when, and whether it helped.
+                What you tried, when, and whether it helped. Add a row for each
+                thing you did, so you can tell later which one helped.
               </CardDescription>
             </CardHeader>
             <CardContent>

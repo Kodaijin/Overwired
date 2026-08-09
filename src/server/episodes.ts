@@ -505,8 +505,7 @@ async function assertWindowFitsMeasurements(
 // Treatments
 // ---------------------------------------------------------------------------
 
-export interface TreatmentData {
-  episodeId: string;
+export interface TreatmentEntry {
   treatmentTypeId: string | null;
   medicationName: string | null;
   dose: string | null;
@@ -515,26 +514,58 @@ export interface TreatmentData {
   notes: string | null;
 }
 
+export type TreatmentData = TreatmentEntry & { episodeId: string };
+
+/**
+ * Records one or more treatments against an episode.
+ *
+ * Everything goes in a single transaction: if one row is rejected none of them
+ * are written, so a half-recorded response to a bout of pain is not possible.
+ * Rows that left the time blank all share one timestamp - they were logged in
+ * the same breath, and inventing slightly different times would be fiction.
+ */
+export async function addTreatments(
+  userId: string,
+  episodeId: string,
+  entries: readonly TreatmentEntry[],
+): Promise<number> {
+  if (entries.length === 0) return 0;
+
+  return prisma.$transaction(async (tx) => {
+    await assertOwnsEpisode(tx, userId, episodeId);
+
+    const owned = await ownedTreatmentTypeIds(
+      tx,
+      userId,
+      entries.map((entry) => entry.treatmentTypeId),
+    );
+    const now = new Date();
+
+    const result = await tx.treatment.createMany({
+      data: entries.map((entry) => ({
+        episodeId,
+        treatmentTypeId:
+          entry.treatmentTypeId && owned.has(entry.treatmentTypeId)
+            ? entry.treatmentTypeId
+            : null,
+        medicationName: entry.medicationName,
+        dose: entry.dose,
+        takenAt: entry.takenAt ?? now,
+        effectiveness: entry.effectiveness,
+        notes: entry.notes,
+      })),
+    });
+
+    return result.count;
+  });
+}
+
 export async function addTreatment(
   userId: string,
   data: TreatmentData,
 ): Promise<void> {
-  await prisma.$transaction(async (tx) => {
-    await assertOwnsEpisode(tx, userId, data.episodeId);
-    const treatmentTypeId = await ownedTreatmentTypeId(tx, userId, data.treatmentTypeId);
-
-    await tx.treatment.create({
-      data: {
-        episodeId: data.episodeId,
-        treatmentTypeId,
-        medicationName: data.medicationName,
-        dose: data.dose,
-        takenAt: data.takenAt ?? new Date(),
-        effectiveness: data.effectiveness,
-        notes: data.notes,
-      },
-    });
-  });
+  const { episodeId, ...entry } = data;
+  await addTreatments(userId, episodeId, [entry]);
 }
 
 export async function updateTreatment(
@@ -573,15 +604,32 @@ export async function deleteTreatment(
   });
 }
 
+/**
+ * Narrows treatment-type ids to the ones this user owns, for the same reason
+ * as `ownedIds` above: the ids came from a form submission.
+ */
+async function ownedTreatmentTypeIds(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  ids: readonly (string | null)[],
+): Promise<Set<string>> {
+  const wanted = ids.filter((id): id is string => id != null);
+  if (wanted.length === 0) return new Set();
+
+  const rows = await tx.treatmentType.findMany({
+    where: { userId, id: { in: wanted } },
+    select: { id: true },
+  });
+
+  return new Set(rows.map((row) => row.id));
+}
+
 async function ownedTreatmentTypeId(
   tx: Prisma.TransactionClient,
   userId: string,
   treatmentTypeId: string | null,
 ): Promise<string | null> {
   if (!treatmentTypeId) return null;
-  const type = await tx.treatmentType.findFirst({
-    where: { id: treatmentTypeId, userId },
-    select: { id: true },
-  });
-  return type?.id ?? null;
+  const owned = await ownedTreatmentTypeIds(tx, userId, [treatmentTypeId]);
+  return owned.has(treatmentTypeId) ? treatmentTypeId : null;
 }

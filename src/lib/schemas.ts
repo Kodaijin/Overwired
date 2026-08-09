@@ -198,17 +198,66 @@ export const deleteMeasurementSchema = z.object({
 // Treatments
 // ---------------------------------------------------------------------------
 
-export const treatmentSchema = z.object({
-  episodeId: idSchema,
+/** One thing that was tried: a pill, a heat pack, a dark room. */
+const treatmentEntryShape = {
   treatmentTypeId: idSchema.nullish().transform((value) => value ?? null),
   medicationName: shortText,
   dose: shortText,
   takenAt: dateSchema.nullish().transform((value) => value ?? null),
   effectiveness: effectivenessSchema.nullish().transform((value) => value ?? null),
   notes: longText,
-});
+};
 
-export const updateTreatmentSchema = treatmentSchema.extend({ id: idSchema });
+/**
+ * A treatment has to say what it actually was. Without this an empty row saves
+ * as an unlabelled entry on the timeline, which is worse than not recording it
+ * - and once several can be added at once, a forgotten blank row is easy to
+ * submit by accident.
+ */
+function checkIdentified(
+  data: { treatmentTypeId: string | null; medicationName: string | null },
+  ctx: z.RefinementCtx,
+): void {
+  if (data.treatmentTypeId == null && data.medicationName == null) {
+    ctx.addIssue({
+      code: "custom",
+      message: "Choose a treatment, or type what you took",
+      path: ["treatmentTypeId"],
+    });
+  }
+}
+
+export const treatmentEntrySchema = z
+  .object(treatmentEntryShape)
+  .superRefine(checkIdentified);
+
+export const treatmentSchema = z
+  .object({ episodeId: idSchema, ...treatmentEntryShape })
+  .superRefine(checkIdentified);
+
+export const updateTreatmentSchema = z
+  .object({ id: idSchema, episodeId: idSchema, ...treatmentEntryShape })
+  .superRefine(checkIdentified);
+
+/** Ten rows is far more than one bout of pain needs; it is a sanity bound. */
+const MAX_TREATMENTS_PER_SUBMISSION = 10;
+
+/**
+ * Several treatments recorded together - the usual case when the response to
+ * pain is "took a pill, lay down, put a heat pack on it". Each keeps its own
+ * time, dose and effectiveness, so they stay separate entries on the timeline
+ * rather than one lumped-together note.
+ */
+export const addTreatmentsSchema = z.object({
+  episodeId: idSchema,
+  treatments: z
+    .array(treatmentEntrySchema)
+    .min(1, "Add at least one treatment")
+    .max(
+      MAX_TREATMENTS_PER_SUBMISSION,
+      `Record at most ${MAX_TREATMENTS_PER_SUBMISSION} treatments at a time`,
+    ),
+});
 
 export const deleteTreatmentSchema = z.object({
   id: idSchema,
@@ -277,3 +326,4 @@ export type CreateEpisodeInput = z.infer<typeof createEpisodeSchema>;
 export type UpdateEpisodeInput = z.infer<typeof updateEpisodeSchema>;
 export type AddMeasurementInput = z.infer<typeof addMeasurementSchema>;
 export type TreatmentInput = z.infer<typeof treatmentSchema>;
+export type TreatmentEntryInput = z.infer<typeof treatmentEntrySchema>;
