@@ -3,6 +3,8 @@ import { computeEpisodeCache } from "@/lib/episode-metrics";
 import { buildEpisodeWhere, EPISODES_PER_PAGE } from "@/lib/filters";
 import { prisma } from "@/lib/prisma";
 import type { EpisodeFilter } from "@/lib/schemas";
+import { isSameMinute } from "date-fns";
+
 import { isEarlierMinute, preserveStoredTime } from "@/lib/time-precision";
 
 /**
@@ -320,6 +322,10 @@ export async function updateEpisode(
     const startedAt = preserveStoredTime(data.startedAt, existing.startedAt);
     const requestedEnd = preserveStoredTime(data.endedAt, existing.endedAt);
 
+    // The start and end markers travel with the window before it is checked,
+    // so moving a time is not refused by the very reading that marks it.
+    await moveBoundaryReadings(tx, data.id, existing, startedAt, requestedEnd);
+
     await assertWindowFitsMeasurements(tx, data.id, startedAt, requestedEnd);
     const endedAt = await clampEndToLastReading(tx, data.id, requestedEnd);
 
@@ -549,6 +555,70 @@ export async function deleteMeasurement(
 
     await recalculateEpisode(tx, input.episodeId);
   });
+}
+
+/**
+ * Moves the readings that mark an episode's start and end when its window moves.
+ *
+ * `createEpisode` seeds the first reading at the start time, and `endEpisode`
+ * records the closing one at the end time - they *are* the boundaries, which is
+ * why the edit form calls them "Pain level at the start" and "when it ended".
+ * Leaving them behind when the window moved made the times uneditable: any
+ * later start time was refused for being after the episode's own first reading.
+ *
+ * Only a reading that currently sits on the boundary is moved, and only when
+ * moving it keeps the timeline in order. A reading taken *during* the episode
+ * is never dragged - it was recorded when it was recorded, and the caller is
+ * told to re-time or remove it instead.
+ */
+async function moveBoundaryReadings(
+  tx: Prisma.TransactionClient,
+  episodeId: string,
+  existing: { startedAt: Date; endedAt: Date | null },
+  startedAt: Date,
+  endedAt: Date | null,
+): Promise<void> {
+  const readings = await tx.painMeasurement.findMany({
+    where: { episodeId },
+    orderBy: [{ recordedAt: "asc" }, { createdAt: "asc" }],
+    select: { id: true, recordedAt: true },
+  });
+
+  if (readings.length === 0) return;
+
+  const first = readings[0];
+  const last = readings[readings.length - 1];
+
+  // The start marker follows the start time, unless the next reading is
+  // already at or before where it would land.
+  const next = readings[1];
+  if (
+    isSameMinute(first.recordedAt, existing.startedAt) &&
+    !isSameMinute(first.recordedAt, startedAt) &&
+    (next == null || !isEarlierMinute(next.recordedAt, startedAt))
+  ) {
+    await tx.painMeasurement.update({
+      where: { id: first.id },
+      data: { recordedAt: startedAt },
+    });
+    first.recordedAt = startedAt;
+  }
+
+  // The closing reading follows the end time, on the same terms.
+  const previous = readings[readings.length - 2];
+  if (
+    endedAt != null &&
+    existing.endedAt != null &&
+    last.id !== first.id &&
+    isSameMinute(last.recordedAt, existing.endedAt) &&
+    !isSameMinute(last.recordedAt, endedAt) &&
+    (previous == null || !isEarlierMinute(endedAt, previous.recordedAt))
+  ) {
+    await tx.painMeasurement.update({
+      where: { id: last.id },
+      data: { recordedAt: endedAt },
+    });
+  }
 }
 
 /**

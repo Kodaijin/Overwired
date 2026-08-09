@@ -374,27 +374,10 @@ runIfDatabase("episode lifecycle", () => {
       expect(episode!.locations[0].location.id).toBe(otherLocation!.id);
     });
 
-    it("refuses a start time later than an existing reading", async () => {
-      const id = await createEpisode(
-        userId,
-        baseEpisode({ startedAt: at("2024-03-01T10:00:00Z") }),
-      );
-
-      await expect(
-        updateEpisode(userId, {
-          id,
-          startedAt: at("2024-03-01T11:00:00Z"),
-          endedAt: null,
-          painType: null,
-          description: null,
-          notes: null,
-          locationIds: [],
-          characteristicIds: [],
-          triggerIds: [],
-          symptomIds: [],
-        }),
-      ).rejects.toBeInstanceOf(WindowConflictError);
-    });
+    // A start time later than the episode's own seeded first reading used to
+    // be refused, which made the start time uneditable. Moving the window and
+    // the readings that mark it is covered by "moving an episode's start and
+    // end time" below, including the cases that are still refused.
 
     it("will not edit another account's episode", async () => {
       const id = await createEpisode(userId, baseEpisode());
@@ -565,6 +548,152 @@ runIfDatabase("episode lifecycle", () => {
       const episode = await getEpisode(userId, id);
       expect(episode!.endedAt).not.toBeNull();
       expect(episode!.currentSeverity).toBe(3);
+    });
+  });
+
+  describe("moving an episode's start and end time", () => {
+    /**
+     * The first reading is seeded at the start time and the closing one is
+     * recorded at the end time, so those readings mark the boundaries and move
+     * with them. Readings taken during the episode never move.
+     */
+    const START = at("2024-03-01T10:00:00Z");
+
+    function edit(id: string, overrides: Partial<UpdateEpisodeData> = {}) {
+      return updateEpisode(userId, {
+        id,
+        startedAt: START,
+        endedAt: null,
+        painType: null,
+        description: null,
+        notes: null,
+        locationIds: [],
+        characteristicIds: [],
+        triggerIds: [],
+        symptomIds: [],
+        ...overrides,
+      });
+    }
+
+    it("takes the first reading with it when the start moves later", async () => {
+      const id = await createEpisode(userId, baseEpisode({ startedAt: START, severity: 6 }));
+      const movedTo = at("2024-03-01T11:00:00Z");
+
+      await edit(id, { startedAt: movedTo });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.startedAt).toEqual(movedTo);
+      expect(episode!.measurements).toHaveLength(1);
+      expect(episode!.measurements[0].recordedAt).toEqual(movedTo);
+      // Moving when it happened does not change how bad it was.
+      expect(episode!.measurements[0].severity).toBe(6);
+    });
+
+    it("takes the first reading with it when the start moves earlier", async () => {
+      const id = await createEpisode(userId, baseEpisode({ startedAt: START, severity: 6 }));
+      const movedTo = at("2024-03-01T08:00:00Z");
+
+      await edit(id, { startedAt: movedTo });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.startedAt).toEqual(movedTo);
+      expect(episode!.measurements[0].recordedAt).toEqual(movedTo);
+    });
+
+    it("moves the start past nothing it should not", async () => {
+      const id = await createEpisode(userId, baseEpisode({ startedAt: START, severity: 4 }));
+      await addMeasurement(userId, {
+        episodeId: id,
+        severity: 8,
+        recordedAt: at("2024-03-01T12:00:00Z"),
+        note: null,
+      });
+      const movedTo = at("2024-03-01T11:00:00Z");
+
+      await edit(id, { startedAt: movedTo });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.measurements.map((m) => m.recordedAt)).toEqual([
+        movedTo,
+        at("2024-03-01T12:00:00Z"),
+      ]);
+    });
+
+    it("refuses a start time past a reading taken during the episode", async () => {
+      const id = await createEpisode(userId, baseEpisode({ startedAt: START, severity: 4 }));
+      await addMeasurement(userId, {
+        episodeId: id,
+        severity: 8,
+        recordedAt: at("2024-03-01T12:00:00Z"),
+        note: null,
+      });
+
+      await expect(
+        edit(id, { startedAt: at("2024-03-01T13:00:00Z") }),
+      ).rejects.toBeInstanceOf(WindowConflictError);
+
+      // Nothing moved.
+      const episode = await getEpisode(userId, id);
+      expect(episode!.startedAt).toEqual(START);
+      expect(episode!.measurements[0].recordedAt).toEqual(START);
+    });
+
+    it("takes the closing reading with it when the end moves earlier", async () => {
+      const id = await createEpisode(userId, baseEpisode({ startedAt: START, severity: 5 }));
+      const endedAt = at("2024-03-01T14:00:00Z");
+      await endEpisode(userId, { id, endedAt, severity: 2, note: null });
+      const movedTo = at("2024-03-01T12:00:00Z");
+
+      await edit(id, { endedAt: movedTo });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.endedAt).toEqual(movedTo);
+      expect(episode!.measurements).toHaveLength(2);
+      expect(episode!.measurements[1].recordedAt).toEqual(movedTo);
+      expect(episode!.measurements[1].severity).toBe(2);
+      expect(episode!.durationSeconds).toBe(7200);
+    });
+
+    it("leaves a mid-episode reading alone when the episode ended without a closing one", async () => {
+      const id = await createEpisode(userId, baseEpisode({ startedAt: START, severity: 5 }));
+      await addMeasurement(userId, {
+        episodeId: id,
+        severity: 7,
+        recordedAt: at("2024-03-01T13:00:00Z"),
+        note: null,
+      });
+      await endEpisode(userId, {
+        id,
+        endedAt: at("2024-03-01T14:00:00Z"),
+        severity: null,
+        note: null,
+      });
+
+      // 11:00 is before the 13:00 reading, which is not an end marker.
+      await expect(
+        edit(id, { endedAt: at("2024-03-01T11:00:00Z") }),
+      ).rejects.toBeInstanceOf(WindowConflictError);
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.measurements[1].recordedAt).toEqual(at("2024-03-01T13:00:00Z"));
+    });
+
+    it("recomputes the duration after the window moves", async () => {
+      const id = await createEpisode(userId, baseEpisode({ startedAt: START, severity: 5 }));
+      await endEpisode(userId, {
+        id,
+        endedAt: at("2024-03-01T14:00:00Z"),
+        severity: 2,
+        note: null,
+      });
+
+      await edit(id, {
+        startedAt: at("2024-03-01T09:00:00Z"),
+        endedAt: at("2024-03-01T15:00:00Z"),
+      });
+
+      const episode = await getEpisode(userId, id);
+      expect(episode!.durationSeconds).toBe(6 * 3600);
     });
   });
 
