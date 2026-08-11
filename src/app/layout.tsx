@@ -18,8 +18,8 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "Pain Tracker",
-    template: "%s - Pain Tracker",
+    default: "Overwired",
+    template: "%s - Overwired",
   },
   description: "A private record of pain episodes, symptoms and treatments.",
   // This is personal health information: keep it out of search indexes even if

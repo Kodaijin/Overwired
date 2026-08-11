@@ -56,5 +56,5 @@ echo "Clock: $(node -e 'console.log(new Date().toString())')"
 echo "Applying database migrations..."
 node_modules/.bin/prisma migrate deploy
 
-echo "Starting Pain Tracker on port ${PORT:-3000}..."
+echo "Starting Overwired on port ${PORT:-3000}..."
 exec "$@"

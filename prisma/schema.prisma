@@ -1,4 +1,4 @@
-// Pain tracker schema.
+// Overwired schema.
 //
 // Design notes:
 //  - Severity is append-only. `PainMeasurement` rows are never mutated by the

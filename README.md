@@ -1,4 +1,4 @@
-# Pain Tracker
+# Overwired
 
 A self-hosted web app for recording pain episodes and the symptoms, triggers and
 treatments around them, then seeing how they change over time.

@@ -48,7 +48,7 @@ export function AppNav({ userLabel }: { userLabel: string }) {
       <div className="mx-auto flex max-w-6xl items-center gap-2 px-4 py-2">
         <Link href="/" className="mr-1 flex items-center gap-2 font-semibold">
           <ActivityIcon className="size-5" aria-hidden="true" />
-          <span className="hidden sm:inline">Pain Tracker</span>
+          <span className="hidden sm:inline">Overwired</span>
         </Link>
 
         <nav aria-label="Main" className="min-w-0 flex-1">
