@@ -33,6 +33,10 @@ COPY . .
 # so the build never queries one; this placeholder only satisfies the Prisma
 # client constructor if a module-level import reaches it.
 ENV DATABASE_URL="postgresql://build:build@127.0.0.1:5432/build"
+# The generated client lands in src/generated, which is not in the repo and is
+# not carried over from the deps stage (only node_modules is), so it has to be
+# generated here - the build imports it. It needs no database.
+RUN node_modules/.bin/prisma generate
 RUN npm run build
 
 # --- production dependencies ------------------------------------------------

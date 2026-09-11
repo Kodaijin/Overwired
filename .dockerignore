@@ -20,3 +20,7 @@ tests
 .windsurf
 .vscode
 .idea
+
+# The Prisma client is generated inside the build, not copied in - a stale
+# local copy must never decide what ships.
+/src/generated
