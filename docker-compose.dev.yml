@@ -4,8 +4,10 @@
 #   npm run db:migrate
 #   npm run dev
 #
-# The app itself runs on the host so you keep fast refresh. Uses a separate
-# volume and port from the production stack so the two can coexist.
+# The app itself runs on the host so you keep fast refresh. Its volume is
+# separate from the production stack's, so neither can overwrite the other's
+# data - but both publish on DB_PORT, so only one of the two can be up at a
+# time. Give this one its own DB_PORT if you want both at once.
 services:
   db:
     image: postgres:17-alpine

@@ -161,6 +161,19 @@ reverse proxy with HTTPS in front of it (Caddy, nginx, Traefik) and point that
 at `127.0.0.1:3000`. Session cookies are marked `Secure` automatically when the
 proxy forwards `X-Forwarded-Proto: https`.
 
+If Compose fails to start with *"port is already allocated"*, something else on
+the machine holds that port - on a server already running other containers,
+another PostgreSQL is the likely one. Set `APP_PORT` or `DB_PORT` in `.env` to
+anything free and start again:
+
+```bash
+DB_PORT=5433
+APP_PORT=3001
+```
+
+Neither affects the app's own connection to the database, which goes over
+Compose's private network at `db:5432` and never touches a host port.
+
 ---
 
 ## 5. Database migrations
@@ -203,10 +216,12 @@ to or archive under **Settings**.
 ### Additional accounts, or a forgotten password
 
 Run the account script on the host, pointing at the same database. The Compose
-database is published on `127.0.0.1:5432` for exactly this:
+database is published on `127.0.0.1:${DB_PORT}` - `5432` unless you changed it -
+for exactly this:
 
 ```bash
-# .env must have a DATABASE_URL with host `localhost` for host-side commands:
+# .env must have a DATABASE_URL with host `localhost` for host-side commands,
+# on whatever port DB_PORT publishes:
 # DATABASE_URL=postgresql://pain:yourpassword@localhost:5432/paintracker?schema=public
 npm install          # once
 npm run create-user
@@ -300,7 +315,8 @@ Run PostgreSQL in Docker and the app on your machine, for fast refresh:
 
 ```bash
 cp .env.example .env
-# for host-side work, DATABASE_URL should use `localhost`, not `db`:
+# for host-side work, DATABASE_URL should use `localhost`, not `db`, on
+# whatever port DB_PORT publishes (5432 by default):
 # DATABASE_URL=postgresql://pain:devpassword@localhost:5432/paintracker?schema=public
 
 docker compose -f docker-compose.dev.yml up -d   # database only
