@@ -2,6 +2,12 @@ services:
   db:
     image: postgres:17-alpine
     restart: unless-stopped
+    # Postgres listens on 15432 rather than the default 5432. Nothing on the
+    # host can collide with a container's own port - each container has its own
+    # network namespace - so this buys no safety; it is here so that every port
+    # in the stack is above 10000 and a 5432 in any error message can only mean
+    # something outside this project.
+    command: ["-p", "15432"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-pain}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required - copy .env.example to .env}
@@ -16,10 +22,10 @@ services:
     ports:
       # Bound to loopback only: the database is reachable from this machine
       # (for migrations and backups) but never from the network.
-      - "127.0.0.1:${DB_PORT:-5432}:5432"
+      - "127.0.0.1:${DB_PORT:-15432}:15432"
     healthcheck:
       test:
-        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pain} -d ${POSTGRES_DB:-paintracker}"]
+        ["CMD-SHELL", "pg_isready -p 15432 -U ${POSTGRES_USER:-pain} -d ${POSTGRES_DB:-paintracker}"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -32,7 +38,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-pain}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-paintracker}?schema=public
+      DATABASE_URL: postgresql://${POSTGRES_USER:-pain}:${POSTGRES_PASSWORD}@db:15432/${POSTGRES_DB:-paintracker}?schema=public
       AUTH_SECRET: ${AUTH_SECRET:?AUTH_SECRET is required - generate one with `openssl rand -base64 48`}
       SESSION_DAYS: ${SESSION_DAYS:-30}
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
@@ -40,12 +46,12 @@ services:
       # type them, and the clock it shows them on.
       TZ: ${TZ:-America/Los_Angeles}
       NODE_ENV: production
-      PORT: 3000
+      PORT: 13000
       HOSTNAME: 0.0.0.0
     ports:
       # Loopback by default. Put a TLS-terminating reverse proxy in front
       # before changing this to 0.0.0.0 - see the README.
-      - "127.0.0.1:${APP_PORT:-3000}:3000"
+      - "127.0.0.1:${APP_PORT:-13000}:13000"
 
 volumes:
   pgdata:

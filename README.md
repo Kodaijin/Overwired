@@ -63,8 +63,8 @@ cp .env.example .env
 | `SESSION_DAYS` | no | `30` | How long a session stays valid. |
 | `ALLOW_REGISTRATION` | no | `false` | Whether `/register` is open. The **first** account can always be created regardless. |
 | `TZ` | no | `America/Los_Angeles` | Your timezone. See below — get this wrong and every time in the app is wrong. |
-| `APP_PORT` | no | `3000` | Host port the app is published on. |
-| `DB_PORT` | no | `5432` | Host port the database is published on (loopback only). |
+| `APP_PORT` | no | `13000` | Host port the app is published on. |
+| `DB_PORT` | no | `15432` | Host port the database is published on (loopback only). |
 
 Generate a secret with:
 
@@ -139,7 +139,7 @@ time the app container starts.
 docker compose up -d
 ```
 
-Then open <http://localhost:3000>.
+Then open <http://localhost:13000>.
 
 On start the app container applies any pending migrations and then serves the
 app. Watch it come up with:
@@ -158,7 +158,7 @@ docker compose down -v       # DELETES the database volume as well
 **Both ports are published on `127.0.0.1` only.** The app is reachable from the
 machine it runs on and nowhere else. To reach it from other devices, put a
 reverse proxy with HTTPS in front of it (Caddy, nginx, Traefik) and point that
-at `127.0.0.1:3000`. Session cookies are marked `Secure` automatically when the
+at `127.0.0.1:13000`. Session cookies are marked `Secure` automatically when the
 proxy forwards `X-Forwarded-Proto: https`.
 
 If Compose fails to start with *"port is already allocated"*, something else on
@@ -167,12 +167,16 @@ another PostgreSQL is the likely one. Set `APP_PORT` or `DB_PORT` in `.env` to
 anything free and start again:
 
 ```bash
-DB_PORT=5433
-APP_PORT=3001
+DB_PORT=15433
+APP_PORT=13001
 ```
 
 Neither affects the app's own connection to the database, which goes over
-Compose's private network at `db:5432` and never touches a host port.
+Compose's private network at `db:15432` and never touches a host port.
+
+The ports *inside* the containers are 13000 and 15432, fixed, and are not
+settings. They cannot collide with anything: a container's ports live in its own
+network namespace. Only the two host ports above can ever be already allocated.
 
 ---
 
@@ -205,7 +209,7 @@ Migrations live in `prisma/migrations/` and are committed to the repository.
 Registration is closed by default (`ALLOW_REGISTRATION=false`), **except** when
 the database has no accounts yet. So on a fresh install:
 
-1. Go to <http://localhost:3000/register>
+1. Go to <http://localhost:13000/register>
 2. Create your account — it is marked as the first account on the server.
 3. After that, `/register` is closed again automatically.
 
@@ -216,13 +220,13 @@ to or archive under **Settings**.
 ### Additional accounts, or a forgotten password
 
 Run the account script on the host, pointing at the same database. The Compose
-database is published on `127.0.0.1:${DB_PORT}` - `5432` unless you changed it -
+database is published on `127.0.0.1:${DB_PORT}` - `15432` unless you changed it -
 for exactly this:
 
 ```bash
 # .env must have a DATABASE_URL with host `localhost` for host-side commands,
 # on whatever port DB_PORT publishes:
-# DATABASE_URL=postgresql://pain:yourpassword@localhost:5432/paintracker?schema=public
+# DATABASE_URL=postgresql://pain:yourpassword@localhost:15432/paintracker?schema=public
 npm install          # once
 npm run create-user
 ```
@@ -316,8 +320,8 @@ Run PostgreSQL in Docker and the app on your machine, for fast refresh:
 ```bash
 cp .env.example .env
 # for host-side work, DATABASE_URL should use `localhost`, not `db`, on
-# whatever port DB_PORT publishes (5432 by default):
-# DATABASE_URL=postgresql://pain:devpassword@localhost:5432/paintracker?schema=public
+# whatever port DB_PORT publishes (15432 by default):
+# DATABASE_URL=postgresql://pain:devpassword@localhost:15432/paintracker?schema=public
 
 docker compose -f docker-compose.dev.yml up -d   # database only
 npm install
@@ -364,10 +368,10 @@ docker compose -f docker-compose.dev.yml up -d
 docker compose -f docker-compose.dev.yml exec -T db \
   psql -U pain -d paintracker -c "CREATE DATABASE paintracker_test;"
 
-TEST_DATABASE_URL="postgresql://pain:devpassword@localhost:5432/paintracker_test?schema=public" \
+TEST_DATABASE_URL="postgresql://pain:devpassword@localhost:15432/paintracker_test?schema=public" \
   npx prisma migrate deploy
 
-TEST_DATABASE_URL="postgresql://pain:devpassword@localhost:5432/paintracker_test?schema=public" \
+TEST_DATABASE_URL="postgresql://pain:devpassword@localhost:15432/paintracker_test?schema=public" \
   npm run test:db
 ```
 

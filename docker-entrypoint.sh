@@ -57,7 +57,7 @@ echo "Applying database migrations..."
 node_modules/.bin/prisma migrate deploy
 
 # This is the port inside the container, which is fixed. What the host
-# publishes it as is APP_PORT - say so, because seeing 3000 here after
+# publishes it as is APP_PORT - say so, because seeing 13000 here after
 # setting APP_PORT to something else reads like the setting was ignored.
-echo "Starting Overwired on container port ${PORT:-3000} (the host publishes it as APP_PORT)..."
+echo "Starting Overwired on container port ${PORT:-13000} (the host publishes it as APP_PORT)..."
 exec "$@"

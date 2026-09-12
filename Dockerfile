@@ -32,7 +32,7 @@ COPY . .
 # No database is reachable at build time. Every page is rendered per request,
 # so the build never queries one; this placeholder only satisfies the Prisma
 # client constructor if a module-level import reaches it.
-ENV DATABASE_URL="postgresql://build:build@127.0.0.1:5432/build"
+ENV DATABASE_URL="postgresql://build:build@127.0.0.1:15432/build"
 # The generated client lands in src/generated, which is not in the repo and is
 # not carried over from the deps stage (only node_modules is), so it has to be
 # generated here - the build imports it. It needs no database.
@@ -49,7 +49,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 # --- runtime ----------------------------------------------------------------
 FROM base AS runner
 ENV NODE_ENV=production
-ENV PORT=3000
+ENV PORT=13000
 ENV HOSTNAME=0.0.0.0
 # The clock the app reads and displays times on. Override with `TZ` in .env.
 # Named zones resolve through Node's bundled ICU data, so no `tzdata` package is
@@ -79,10 +79,10 @@ COPY --chown=nextjs:nodejs docker-entrypoint.sh ./docker-entrypoint.sh
 RUN tr -d '\r' < ./docker-entrypoint.sh > /tmp/entrypoint.sh && mv /tmp/entrypoint.sh ./docker-entrypoint.sh && chmod +x ./docker-entrypoint.sh
 
 USER nextjs
-EXPOSE 3000
+EXPOSE 13000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||13000)+'/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["node_modules/.bin/next", "start"]
