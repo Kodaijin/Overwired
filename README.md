@@ -65,6 +65,7 @@ cp .env.example .env
 | `TZ` | no | `America/Los_Angeles` | Your timezone. See below — get this wrong and every time in the app is wrong. |
 | `APP_PORT` | no | `13000` | Host port the app is published on. |
 | `DB_PORT` | no | `15432` | Host port the database is published on (loopback only). |
+| `APP_BIND` | no | `127.0.0.1` | Which host interface the app is published on. `0.0.0.0` to reach it from other machines — see §4.1. |
 
 Generate a secret with:
 
@@ -155,11 +156,44 @@ docker compose down          # keeps your data
 docker compose down -v       # DELETES the database volume as well
 ```
 
-**Both ports are published on `127.0.0.1` only.** The app is reachable from the
-machine it runs on and nowhere else. To reach it from other devices, put a
-reverse proxy with HTTPS in front of it (Caddy, nginx, Traefik) and point that
-at `127.0.0.1:13000`. Session cookies are marked `Secure` automatically when the
+### 4.1 Reaching it from other machines
+
+**By default both ports are published on `127.0.0.1` only**, so the app answers
+on the machine it runs on and refuses everything else. On a headless server, a
+VM or a Proxmox LXC that is indistinguishable from a broken deployment: the
+container reports `healthy`, `curl http://127.0.0.1:13000/login` works once you
+have SSH'd in, and a browser on your laptop says **connection refused**. Check
+which interface it is on before debugging anything else:
+
+```bash
+docker compose ps        # 127.0.0.1:13000->13000/tcp  = this machine only
+                         # 0.0.0.0:13000->13000/tcp    = the whole network
+```
+
+Two ways to open it up. **A reverse proxy is the right one:** leave `APP_BIND`
+alone, run Caddy/nginx/Traefik with a certificate, and point it at
+`127.0.0.1:13000`. Session cookies are marked `Secure` automatically when the
 proxy forwards `X-Forwarded-Proto: https`.
+
+**Or publish it on the network directly**, which is quicker and worth
+understanding before you do it:
+
+```bash
+APP_BIND=0.0.0.0     # in .env, then: docker compose up -d
+```
+
+That serves plain HTTP. The login password, the session cookie and every pain
+note you write cross the network in the clear, readable by anything between
+your browser and the server, and cookies cannot be marked `Secure`. On a home
+network you control that is a reasonable way to get going; it is not something
+to leave running long-term, and it must never face the internet. The database
+stays on loopback either way - `APP_BIND` moves the app only.
+
+If you just want it on your own laptop and nothing else, skip both and tunnel:
+
+```bash
+ssh -L 13000:127.0.0.1:13000 user@server   # then open http://localhost:13000
+```
 
 If Compose fails to start with *"port is already allocated"*, something else on
 the machine holds that port - on a server already running other containers,

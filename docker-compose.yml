@@ -20,8 +20,11 @@ services:
       # Named volume => data survives `docker compose down` and container rebuilds.
       - pgdata:/var/lib/postgresql/data
     ports:
-      # Bound to loopback only: the database is reachable from this machine
-      # (for migrations and backups) but never from the network.
+      # Loopback, and deliberately not configurable the way APP_BIND is: the
+      # app reaches the database over Compose's private network, so the only
+      # thing this mapping serves is host-side psql and backups. Nothing off
+      # the machine has any reason to reach the database - tunnel over SSH if
+      # you need it from elsewhere.
       - "127.0.0.1:${DB_PORT:-15432}:15432"
     healthcheck:
       test:
@@ -49,9 +52,13 @@ services:
       PORT: 13000
       HOSTNAME: 0.0.0.0
     ports:
-      # Loopback by default. Put a TLS-terminating reverse proxy in front
-      # before changing this to 0.0.0.0 - see the README.
-      - "127.0.0.1:${APP_PORT:-13000}:13000"
+      # APP_BIND is which of the host's interfaces the app is published on, and
+      # it defaults to loopback: on a bare VM or LXC that means the app answers
+      # on the machine itself and refuses every connection from the network,
+      # which is the safe default but looks exactly like a broken deployment.
+      # Set APP_BIND=0.0.0.0 to serve the LAN. See the README first - over plain
+      # HTTP that carries session cookies and health data in the clear.
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-13000}:13000"
 
 volumes:
   pgdata:
