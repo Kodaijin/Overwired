@@ -1,0 +1,15 @@
+# Line endings.
+#
+# These files are read by Linux inside the containers, where a CRLF is not
+# whitespace but part of the token. A checkout on Windows converts endings by
+# default (core.autocrlf=true), and `docker-entrypoint.sh` with a CRLF shebang
+# fails at container start as:
+#
+#   exec ./docker-entrypoint.sh: no such file or directory
+#
+# which names the file it just found, and so reads as anything but a line
+# ending problem. Pin them to LF in the working tree as well as in the repo.
+*.sh text eol=lf
+Dockerfile text eol=lf
+docker-compose*.yml text eol=lf
+.env.example text eol=lf

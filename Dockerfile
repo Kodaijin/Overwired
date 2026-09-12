@@ -71,7 +71,12 @@ COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
 COPY --from=builder --chown=nextjs:nodejs /app/prisma.config.ts ./prisma.config.ts
 
 COPY --chown=nextjs:nodejs docker-entrypoint.sh ./docker-entrypoint.sh
-RUN chmod +x ./docker-entrypoint.sh
+# Strip carriage returns before making it executable. .gitattributes pins this
+# file to LF, but that only takes effect on checkout - an existing clone on
+# Windows still has CRLF in the working tree, and `docker build` would bake a
+# shebang the kernel cannot resolve. Normalising here makes the image correct
+# no matter what the build context holds.
+RUN tr -d '\r' < ./docker-entrypoint.sh > /tmp/entrypoint.sh && mv /tmp/entrypoint.sh ./docker-entrypoint.sh && chmod +x ./docker-entrypoint.sh
 
 USER nextjs
 EXPOSE 3000
